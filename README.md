@@ -1,20 +1,34 @@
 # cw-multinet
 
-`cw-multinet` is a small CNI plugin for Multus secondary pod IPs on CoreWeave-like Kubernetes clusters where the primary network is a managed Cilium overlay and secondary L2 reachability is not available.
+`cw-multinet` is a Multus delegate CNI that creates real secondary pod NICs on a virtual L2 overlay. It is intended for CoreWeave-like Kubernetes clusters where the primary network is a managed Cilium overlay and the provider does not expose a customizable secondary L2 fabric.
 
-The plugin delegates IP allocation to standard IPAM plugins, then creates a pod-local secondary interface and assigns the returned addresses. This lets telco-style workloads expose predictable interfaces such as `n2`, `n3`, `n4`, `n6`, and `s1-mme` without relying on macvlan, ipvlan L2 mode, VLANs, or Cilium customization.
+The plugin creates a per-network Linux bridge and VXLAN device on each node, attaches each pod with a veth pair, delegates address allocation to standard CNI IPAM plugins, and programs VXLAN flood entries for remote node VTEPs. Intra-node traffic is switched locally by the bridge. Inter-node traffic is encapsulated in VXLAN over the existing node network.
+
+This gives telco-style workloads predictable interfaces such as `n2`, `n3`, `n4`, `n6`, and `s1-mme` with L2 behavior suitable for secondary-plane communication.
 
 ## What It Does
 
 - Works as a Multus delegate CNI.
+- Creates pod veth NICs, not dummy interfaces.
+- Creates one host bridge and one VXLAN device per VNI.
+- Supports inter-node L2 by VXLAN flooding to configured peer node IPs.
 - Supports any CNI IPAM executable in `CNI_PATH`, including `static`, `host-local`, and `whereabouts`.
-- Creates `dummy` secondary interfaces by default, which do not need L2 adjacency.
-- Supports optional `veth` mode for node-local host visibility and future routed/tunnel agents.
 - Implements CNI `ADD`, `DEL`, and `CHECK`.
 
-## What It Does Not Do
+## Dataplane Shape
 
-The default mode does not make secondary IPs routable across nodes. That is deliberate: a managed overlay that does not expose L2 cannot make macvlan/ipvlan-style secondary networks work by configuration alone. Use this plugin when the NF needs secondary interface names and bindable IPs. Add a node route/tunnel agent if the NF must exchange traffic directly between secondary IPs across nodes.
+```text
+pod netns                    host netns                              remote node
+---------                    ---------                              -----------
+n2@ifX  <--- veth pair --->  cwm... -> br-cwm-3002 -> vx-cwm-3002  ~~ VXLAN ~~  vx-cwm-3002 -> br-cwm-3002 -> peer pods
+```
+
+Each telco plane should use a distinct VNI. For example:
+
+- N2: `3002`
+- N3: `3003`
+- N4: `3004`
+- N6: `3006`
 
 ## Build
 
@@ -38,6 +52,11 @@ The installer copies `/cw-multinet` to `/opt/cni/bin/cw-multinet` on every node.
 
 ## Example NAD
 
+The `peers` list must contain the node VTEP IPs. On the sample CoreWeave cluster these are the node InternalIPs:
+
+- `10.176.244.201`
+- `10.176.243.1`
+
 ```yaml
 apiVersion: k8s.cni.cncf.io/v1
 kind: NetworkAttachmentDefinition
@@ -50,7 +69,8 @@ spec:
       "cniVersion": "0.4.0",
       "name": "n2-whereabouts",
       "type": "cw-multinet",
-      "interfaceType": "dummy",
+      "vni": 3002,
+      "peers": ["10.176.244.201", "10.176.243.1"],
       "ipam": {
         "type": "whereabouts",
         "range": "10.30.2.0/24",
@@ -73,13 +93,32 @@ metadata:
 | Field | Default | Description |
 | --- | --- | --- |
 | `type` | required | Must be `cw-multinet`. |
-| `interfaceType` | `dummy` | `dummy` for no-L2 pod-local IPs, or `veth` for pod/host paired links. |
+| `vni` | required | VXLAN Network Identifier, `1` to `16777215`. |
+| `peers` | `[]` | Remote node VTEP IPs for VXLAN flood entries. Empty gives intra-node only. |
+| `bridgeName` | `br-cwm-<vni>` | Host bridge name. Must fit Linux's 15-character interface limit. |
+| `vxlanName` | `vx-cwm-<vni>` | Host VXLAN device name. Must fit Linux's 15-character interface limit. |
+| `vxlanPort` | `4789` | UDP destination port for VXLAN. |
+| `mtu` | `1450` | MTU for bridge, VXLAN, and pod veth. Adjust for the provider underlay. |
+| `underlayInterface` | kernel route | Optional host interface to bind the VXLAN VTEP to. |
+| `sourceAddress` | kernel route | Optional local VTEP source IP. |
+| `hostVethPrefix` | `cwm` | Prefix for host-side pod veth names. |
+| `disableLearning` | `false` | Disable VXLAN source-MAC learning. |
+| `disableFDBFlood` | `false` | Do not program peer flood entries. |
+| `skipPeerSelf` | `false` | Skip peers that match local interface IPs. |
 | `ipam` | required | Any CNI IPAM config. |
-| `mtu` | kernel default | Optional MTU for created link. |
 | `routes` | `[]` | Optional extra CIDRs to route through the secondary interface. |
-| `useIPAMRoutes` | `false` | Install routes returned by the IPAM plugin. Keep false for bind-only dummy interfaces. |
+| `useIPAMRoutes` | `false` | Install routes returned by the IPAM plugin. |
 | `routeMetric` | `200` | Metric used for plugin-managed routes. |
-| `vethHostPrefix` | `cw` | Host-side veth name prefix in veth mode. |
+
+## IPAM Notes
+
+Whereabouts is the recommended dynamic allocator when addresses must be unique across nodes. `host-local` is only node-local, so it can allocate duplicate secondary IPs on different nodes unless ranges are partitioned per node. `static` is useful for deterministic NF interface addresses.
+
+## Operational Notes
+
+All nodes must be able to send UDP VXLAN traffic to all configured peer node IPs on `vxlanPort`.
+
+The current implementation uses static `peers` in the NAD. That is enough for a fixed-size cluster and useful for initial validation. A production-hardening follow-up should add a small node watcher or generated ConfigMap workflow so peer membership updates automatically when nodes are added or removed.
 
 ## Sample Cluster Notes
 

@@ -9,11 +9,12 @@ spec:
       "cniVersion": "0.4.0",
       "name": "n2-static",
       "type": "cw-multinet",
-      "interfaceType": "dummy",
+      "vni": 2002,
+      "peers": ["10.176.244.201", "10.176.243.1"],
       "ipam": {
         "type": "static",
         "addresses": [
-          { "address": "10.20.2.10/32" }
+          { "address": "10.20.2.10/24" }
         ]
       }
     }
