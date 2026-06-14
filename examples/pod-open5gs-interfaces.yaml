@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: open5gs-interface-smoke
+  namespace: core5g
+  annotations:
+    k8s.v1.cni.cncf.io/networks: |
+      [
+        { "name": "n2-whereabouts", "interface": "n2" },
+        { "name": "n3-whereabouts", "interface": "n3" },
+        { "name": "n4-whereabouts", "interface": "n4" },
+        { "name": "n6-whereabouts", "interface": "n6" }
+      ]
+spec:
+  restartPolicy: Never
+  containers:
+    - name: netshoot
+      image: ghcr.io/nicolaka/netshoot:latest
+      command: ["sleep", "3600"]

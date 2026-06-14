@@ -1,0 +1,75 @@
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: n2-hostlocal
+  namespace: core5g
+spec:
+  config: |
+    {
+      "cniVersion": "0.4.0",
+      "name": "n2-hostlocal",
+      "type": "cw-multinet",
+      "interfaceType": "dummy",
+      "ipam": {
+        "type": "host-local",
+        "ranges": [[{ "subnet": "10.20.2.0/24", "rangeStart": "10.20.2.20", "rangeEnd": "10.20.2.250" }]],
+        "dataDir": "/var/lib/cni/networks/cw-multinet-n2"
+      }
+    }
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: n3-hostlocal
+  namespace: core5g
+spec:
+  config: |
+    {
+      "cniVersion": "0.4.0",
+      "name": "n3-hostlocal",
+      "type": "cw-multinet",
+      "interfaceType": "dummy",
+      "ipam": {
+        "type": "host-local",
+        "ranges": [[{ "subnet": "10.20.3.0/24", "rangeStart": "10.20.3.20", "rangeEnd": "10.20.3.250" }]],
+        "dataDir": "/var/lib/cni/networks/cw-multinet-n3"
+      }
+    }
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: n4-hostlocal
+  namespace: core5g
+spec:
+  config: |
+    {
+      "cniVersion": "0.4.0",
+      "name": "n4-hostlocal",
+      "type": "cw-multinet",
+      "interfaceType": "dummy",
+      "ipam": {
+        "type": "host-local",
+        "ranges": [[{ "subnet": "10.20.4.0/24", "rangeStart": "10.20.4.20", "rangeEnd": "10.20.4.250" }]],
+        "dataDir": "/var/lib/cni/networks/cw-multinet-n4"
+      }
+    }
+---
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: n6-hostlocal
+  namespace: core5g
+spec:
+  config: |
+    {
+      "cniVersion": "0.4.0",
+      "name": "n6-hostlocal",
+      "type": "cw-multinet",
+      "interfaceType": "dummy",
+      "ipam": {
+        "type": "host-local",
+        "ranges": [[{ "subnet": "10.20.6.0/24", "rangeStart": "10.20.6.20", "rangeEnd": "10.20.6.250" }]],
+        "dataDir": "/var/lib/cni/networks/cw-multinet-n6"
+      }
+    }
