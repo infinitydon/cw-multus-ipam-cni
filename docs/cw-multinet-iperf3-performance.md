@@ -142,3 +142,86 @@ UDP client summary:
 - This is a direct CNI overlay test. It does not use AMF, SMF, UPF, PacketRusher, GTP-U, PFCP, or the UE VRF.
 - The test uses a new VNI, so the first packets can fail until the `cw-multinet-agent` sees and reconciles the new host VXLAN device. The current agent sync period is `30s`.
 - The TCP parallel result is the best indicator of aggregate cw-multinet inter-node throughput on this cluster: `71.3 Gbits/sec` receiver throughput over VXLAN.
+
+## Event-Driven Reconcile Retest
+
+After the initial test, the agent was updated to remove the first-packet race for new VNIs:
+
+- Watches Kubernetes Nodes with a shared informer and reconciles peers on node changes.
+- Watches `NetworkAttachmentDefinition` resources with a dynamic informer.
+- Parses `type: cw-multinet` NAD configs and pre-creates declared bridge/VXLAN devices on every node.
+- Subscribes to Linux netlink link events and reconciles when local `vx-cwm-*` devices appear.
+- Keeps the periodic reconcile loop as a self-healing fallback.
+
+Deployed image:
+
+```text
+installer=ghcr.io/infinitydon/cw-multus-ipam-cni:7b7286b
+agent=ghcr.io/infinitydon/cw-multus-ipam-cni:7b7286b
+```
+
+The free5GC/PacketRusher releases and the `free5gc-cwm` namespace were deleted before this retest.
+
+### Pre-Warmed NAD Test
+
+For VNI `6401`, only the namespace and NAD were created first. Before creating any pods, both node agents pre-created the overlay:
+
+```text
+g46cd14:
+created bridge=br-cwm-6401
+created vxlan=vx-cwm-6401 vni=6401 bridge=br-cwm-6401
+added fdb peer=10.176.243.1 link=vx-cwm-6401
+
+g80b396:
+created bridge=br-cwm-6401
+created vxlan=vx-cwm-6401 vni=6401 bridge=br-cwm-6401
+added fdb peer=10.176.244.201 link=vx-cwm-6401
+```
+
+After the pods became Ready, the first ping succeeded immediately:
+
+```text
+PING 10.251.0.10 (10.251.0.10) 56(84) bytes of data.
+64 bytes from 10.251.0.10: icmp_seq=1 ttl=64 time=0.590 ms
+
+5 packets transmitted, 5 received, 0% packet loss
+rtt min/avg/max/mdev = 0.265/0.343/0.590/0.123 ms
+```
+
+Throughput on VNI `6401`:
+
+| Test | Direction | Duration | Result |
+| --- | --- | ---: | --- |
+| Ping | client to server | 5 packets | `0%` loss, `0.343 ms` average RTT |
+| TCP single stream | `10.251.0.20 -> 10.251.0.10` | 15s | `39.0 GBytes`, `22.4 Gbits/sec` receiver |
+| TCP 4 parallel streams | `10.251.0.20 -> 10.251.0.10` | 15s | `110 GBytes`, `62.8 Gbits/sec` receiver |
+| TCP reverse single stream | `10.251.0.10 -> 10.251.0.20` | 15s | `23.2 GBytes`, `13.3 Gbits/sec` receiver |
+| UDP target 10G | `10.251.0.20 -> 10.251.0.10` | 15s | `2.35 GBytes`, `1.35 Gbits/sec`, `0%` loss, `0.009 ms` jitter |
+
+### Simultaneous Apply Test
+
+For VNI `6402`, namespace, NAD, server pod, and client pod were applied together. Both node agents still created the overlay promptly:
+
+```text
+g46cd14:
+created bridge=br-cwm-6402
+created vxlan=vx-cwm-6402 vni=6402 bridge=br-cwm-6402
+added fdb peer=10.176.243.1 link=vx-cwm-6402
+
+g80b396:
+created bridge=br-cwm-6402
+created vxlan=vx-cwm-6402 vni=6402 bridge=br-cwm-6402
+added fdb peer=10.176.244.201 link=vx-cwm-6402
+```
+
+The first ping after both pods became Ready also succeeded immediately:
+
+```text
+PING 10.252.0.10 (10.252.0.10) 56(84) bytes of data.
+64 bytes from 10.252.0.10: icmp_seq=1 ttl=64 time=0.670 ms
+
+5 packets transmitted, 5 received, 0% packet loss
+rtt min/avg/max/mdev = 0.215/0.343/0.670/0.165 ms
+```
+
+Result: passed. The new event-driven/NAD-aware agent removed the observed initial `Destination Host Unreachable` behavior for fresh VNIs in both pre-warmed and simultaneous apply flows.
