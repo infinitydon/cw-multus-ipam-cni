@@ -117,6 +117,11 @@ The `cw-multinet-agent` DaemonSet watches Kubernetes Nodes, extracts Ready node 
 
 The agent also disables Linux bridge netfilter by default (`net.bridge.bridge-nf-call-iptables=0` and `net.bridge.bridge-nf-call-ip6tables=0`). This is required for transparent L2 behavior on CoreWeave/Cilium because bridged secondary-plane packets otherwise traverse host iptables/Cilium masquerade rules and can have their source rewritten.
 
+## Validation Reports
+
+- `docs/cw-multinet-iperf3-performance.md`: direct cross-node cw-multinet iperf3 test outside of the 5G core.
+- `docs/iperf3-validation.md`: free5GC/PacketRusher UE-plane iperf3 validation through UPF.
+
 ## Sample Cluster Notes
 
 The provided kubeconfig points to a two-node CoreWeave cluster with:
