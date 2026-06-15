@@ -233,7 +233,7 @@ func ensureOverlay(conf *netConf) error {
 	if err != nil {
 		return err
 	}
-	vxlan, err := ensureVxlan(conf, bridge.Attrs().Index)
+	vxlan, err := ensureVxlan(conf, bridge)
 	if err != nil {
 		return err
 	}
@@ -274,13 +274,13 @@ func ensureBridge(name string, mtu int) (netlink.Link, error) {
 	return link, nil
 }
 
-func ensureVxlan(conf *netConf, bridgeIndex int) (netlink.Link, error) {
+func ensureVxlan(conf *netConf, bridge netlink.Link) (netlink.Link, error) {
 	link, err := netlink.LinkByName(conf.VxlanName)
 	if err == nil {
 		if link.Type() != "vxlan" {
 			return nil, fmt.Errorf("link %s already exists with type %s, expected vxlan", conf.VxlanName, link.Type())
 		}
-		if err := enslaveAndRaise(link, bridgeIndex, conf.MTU); err != nil {
+		if err := enslaveAndRaise(link, bridge, conf.MTU); err != nil {
 			return nil, err
 		}
 		return link, nil
@@ -313,19 +313,19 @@ func ensureVxlan(conf *netConf, bridgeIndex int) (netlink.Link, error) {
 	if err != nil {
 		return nil, fmt.Errorf("lookup created vxlan %s: %w", conf.VxlanName, err)
 	}
-	if err := enslaveAndRaise(link, bridgeIndex, conf.MTU); err != nil {
+	if err := enslaveAndRaise(link, bridge, conf.MTU); err != nil {
 		return nil, err
 	}
 	return link, nil
 }
 
-func enslaveAndRaise(link netlink.Link, masterIndex, mtu int) error {
+func enslaveAndRaise(link, bridge netlink.Link, mtu int) error {
 	if err := setMTU(link, mtu); err != nil {
 		return err
 	}
-	if link.Attrs().MasterIndex != masterIndex {
-		if err := netlink.LinkSetMasterByIndex(link, masterIndex); err != nil {
-			return fmt.Errorf("attach %s to bridge index %d: %w", link.Attrs().Name, masterIndex, err)
+	if link.Attrs().MasterIndex != bridge.Attrs().Index {
+		if err := netlink.LinkSetMaster(link, bridge); err != nil {
+			return fmt.Errorf("attach %s to bridge %s: %w", link.Attrs().Name, bridge.Attrs().Name, err)
 		}
 	}
 	if err := netlink.LinkSetUp(link); err != nil {
