@@ -22,16 +22,18 @@ import (
 )
 
 const (
-	defaultVXLANPrefix = "vx-cwm-"
-	defaultSyncPeriod  = 15 * time.Second
+	defaultVXLANPrefix  = "vx-cwm-"
+	defaultBridgePrefix = "br-cwm-"
+	defaultSyncPeriod   = 15 * time.Second
 )
 
 var floodMAC = net.HardwareAddr{0, 0, 0, 0, 0, 0}
 
 type agentConfig struct {
-	VXLANPrefix string
-	SyncPeriod  time.Duration
-	NodeName    string
+	VXLANPrefix  string
+	BridgePrefix string
+	SyncPeriod   time.Duration
+	NodeName     string
 }
 
 func main() {
@@ -43,7 +45,7 @@ func main() {
 		log.Fatalf("create kubernetes client: %v", err)
 	}
 
-	log.Printf("starting cw-multinet-agent vxlanPrefix=%s syncPeriod=%s nodeName=%s", cfg.VXLANPrefix, cfg.SyncPeriod, cfg.NodeName)
+	log.Printf("starting cw-multinet-agent vxlanPrefix=%s bridgePrefix=%s syncPeriod=%s nodeName=%s", cfg.VXLANPrefix, cfg.BridgePrefix, cfg.SyncPeriod, cfg.NodeName)
 	if err := run(context.Background(), client, cfg); err != nil {
 		log.Fatalf("agent stopped: %v", err)
 	}
@@ -51,9 +53,10 @@ func main() {
 
 func loadAgentConfig() agentConfig {
 	cfg := agentConfig{
-		VXLANPrefix: envOrDefault("VXLAN_PREFIX", defaultVXLANPrefix),
-		SyncPeriod:  defaultSyncPeriod,
-		NodeName:    os.Getenv("NODE_NAME"),
+		VXLANPrefix:  envOrDefault("VXLAN_PREFIX", defaultVXLANPrefix),
+		BridgePrefix: envOrDefault("BRIDGE_PREFIX", defaultBridgePrefix),
+		SyncPeriod:   defaultSyncPeriod,
+		NodeName:     os.Getenv("NODE_NAME"),
 	}
 	if raw := os.Getenv("SYNC_PERIOD"); raw != "" {
 		parsed, err := time.ParseDuration(raw)
@@ -91,6 +94,9 @@ func reconcile(ctx context.Context, client kubernetes.Interface, cfg agentConfig
 		return err
 	}
 	for _, vxlan := range vxlans {
+		if err := ensureBridgeAttachment(vxlan, cfg); err != nil {
+			return err
+		}
 		if err := reconcileFDB(vxlan, desiredPeers); err != nil {
 			return err
 		}
@@ -152,6 +158,30 @@ func discoverVXLANs(prefix string) ([]netlink.Link, error) {
 		}
 	}
 	return vxlans, nil
+}
+
+func ensureBridgeAttachment(vxlan netlink.Link, cfg agentConfig) error {
+	suffix := strings.TrimPrefix(vxlan.Attrs().Name, cfg.VXLANPrefix)
+	bridgeName := cfg.BridgePrefix + suffix
+	bridge, err := netlink.LinkByName(bridgeName)
+	if err != nil {
+		return fmt.Errorf("lookup bridge %s for %s: %w", bridgeName, vxlan.Attrs().Name, err)
+	}
+	if vxlan.Attrs().MasterIndex == bridge.Attrs().Index {
+		return nil
+	}
+	if err := netlink.LinkSetMaster(vxlan, bridge); err != nil {
+		return fmt.Errorf("attach %s to %s: %w", vxlan.Attrs().Name, bridgeName, err)
+	}
+	refetched, err := netlink.LinkByName(vxlan.Attrs().Name)
+	if err != nil {
+		return fmt.Errorf("lookup attached vxlan %s: %w", vxlan.Attrs().Name, err)
+	}
+	if refetched.Attrs().MasterIndex != bridge.Attrs().Index {
+		return fmt.Errorf("attach %s to %s did not persist", vxlan.Attrs().Name, bridgeName)
+	}
+	log.Printf("attached vxlan=%s bridge=%s", vxlan.Attrs().Name, bridgeName)
+	return nil
 }
 
 func reconcileFDB(vxlan netlink.Link, desiredPeers map[string]net.IP) error {

@@ -53,6 +53,8 @@ spec:
                   fieldPath: spec.nodeName
             - name: VXLAN_PREFIX
               value: vx-cwm-
+            - name: BRIDGE_PREFIX
+              value: br-cwm-
             - name: SYNC_PERIOD
               value: 10s
           securityContext:
