@@ -264,10 +264,14 @@ func ensureBridge(name string, mtu int) (netlink.Link, error) {
 	if err := netlink.LinkAdd(bridge); err != nil {
 		return nil, fmt.Errorf("add bridge %s: %w", name, err)
 	}
-	if err := netlink.LinkSetUp(bridge); err != nil {
+	link, err = netlink.LinkByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("lookup created bridge %s: %w", name, err)
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
 		return nil, fmt.Errorf("set bridge %s up: %w", name, err)
 	}
-	return bridge, nil
+	return link, nil
 }
 
 func ensureVxlan(conf *netConf, bridgeIndex int) (netlink.Link, error) {
