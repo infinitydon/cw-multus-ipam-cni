@@ -129,8 +129,10 @@ The agent also disables Linux bridge netfilter by default (`net.bridge.bridge-nf
 
 ## Validation Reports
 
+- `docs/comprehensive-validation-2026-06-15.md`: static, host-local, whereabouts, auto-VNI, explicit VNI, throughput, leader restart, conflict detection, and cleanup validation.
 - `docs/cw-multinet-iperf3-performance.md`: direct cross-node cw-multinet iperf3 test outside of the 5G core.
 - `docs/iperf3-validation.md`: free5GC/PacketRusher UE-plane iperf3 validation through UPF.
+- `kubevirt/test-results-2026-06-15.md`: KubeVirt VM-to-VM validation over a cw-multinet secondary network.
 
 ## Sample Cluster Notes
 
