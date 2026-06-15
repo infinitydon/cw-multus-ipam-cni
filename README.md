@@ -88,7 +88,7 @@ metadata:
 | Field | Default | Description |
 | --- | --- | --- |
 | `type` | required | Must be `cw-multinet`. |
-| `vni` | required | VXLAN Network Identifier, `1` to `16777215`. |
+| `vni` | auto-assigned | VXLAN Network Identifier, `1` to `16777215`. If omitted, the agent patches the NAD with a stable VNI from its configured allocation range. |
 | `peers` | `[]` | Optional static remote node VTEP IPs programmed by the CNI call. The node agent handles dynamic peers. |
 | `bridgeName` | `br-cwm-<vni>` | Host bridge name. Must fit Linux's 15-character interface limit. |
 | `vxlanName` | `vx-cwm-<vni>` | Host VXLAN device name. Must fit Linux's 15-character interface limit. |
@@ -108,6 +108,14 @@ metadata:
 ## IPAM Notes
 
 Whereabouts is the recommended dynamic allocator when addresses must be unique across nodes. `host-local` is only node-local, so it can allocate duplicate secondary IPs on different nodes unless ranges are partitioned per node. `static` is useful for deterministic NF interface addresses.
+
+## VNI Allocation
+
+Operators may set `vni` explicitly when a deterministic VNI is required. If `vni` is omitted, the `cw-multinet-agent` allocates one from `VNI_RANGE_START` to `VNI_RANGE_END` and patches the NAD `spec.config` so every node and future pod sees the same explicit value.
+
+The default allocation range is `10000-16777215`. The agent detects duplicate explicit VNIs and reports a conflict instead of silently reusing the same overlay.
+
+Pre-warming NAD-declared overlays is disabled by default (`PREWARM_NADS=false`). The default behavior is lazy CNI creation plus event-driven agent reconciliation. Set `PREWARM_NADS=true` only when you intentionally want every live cw-multinet NAD instantiated on every node before pods attach.
 
 ## Operational Notes
 

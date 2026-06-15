@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
@@ -33,6 +34,8 @@ const (
 	defaultVXLANPrefix  = "vx-cwm-"
 	defaultBridgePrefix = "br-cwm-"
 	defaultSyncPeriod   = 15 * time.Second
+	defaultVNIStart     = 10000
+	defaultVNIEnd       = 16777215
 )
 
 var floodMAC = net.HardwareAddr{0, 0, 0, 0, 0, 0}
@@ -43,6 +46,10 @@ type agentConfig struct {
 	SyncPeriod             time.Duration
 	NodeName               string
 	DisableBridgeNetfilter bool
+	PrewarmNADs            bool
+	AutoAllocateVNI        bool
+	VNIStart               int
+	VNIEnd                 int
 }
 
 type overlayDecl struct {
@@ -66,6 +73,13 @@ type nadConfig struct {
 	UnderlayIface   string `json:"underlayInterface,omitempty"`
 	SourceAddress   string `json:"sourceAddress,omitempty"`
 	DisableLearning bool   `json:"disableLearning,omitempty"`
+}
+
+type nadOverlay struct {
+	Namespace string
+	Name      string
+	Config    nadConfig
+	RawConfig string
 }
 
 var nadGVR = schema.GroupVersionResource{
@@ -93,7 +107,7 @@ func main() {
 		log.Fatalf("create dynamic client: %v", err)
 	}
 
-	log.Printf("starting cw-multinet-agent vxlanPrefix=%s bridgePrefix=%s syncPeriod=%s nodeName=%s disableBridgeNetfilter=%t", cfg.VXLANPrefix, cfg.BridgePrefix, cfg.SyncPeriod, cfg.NodeName, cfg.DisableBridgeNetfilter)
+	log.Printf("starting cw-multinet-agent vxlanPrefix=%s bridgePrefix=%s syncPeriod=%s nodeName=%s disableBridgeNetfilter=%t prewarmNADs=%t autoAllocateVNI=%t vniRange=%d-%d", cfg.VXLANPrefix, cfg.BridgePrefix, cfg.SyncPeriod, cfg.NodeName, cfg.DisableBridgeNetfilter, cfg.PrewarmNADs, cfg.AutoAllocateVNI, cfg.VNIStart, cfg.VNIEnd)
 	if err := run(context.Background(), client, dynClient, cfg); err != nil {
 		log.Fatalf("agent stopped: %v", err)
 	}
@@ -106,6 +120,10 @@ func loadAgentConfig() agentConfig {
 		SyncPeriod:             defaultSyncPeriod,
 		NodeName:               os.Getenv("NODE_NAME"),
 		DisableBridgeNetfilter: envBoolOrDefault("DISABLE_BRIDGE_NETFILTER", true),
+		PrewarmNADs:            envBoolOrDefault("PREWARM_NADS", false),
+		AutoAllocateVNI:        envBoolOrDefault("AUTO_ALLOCATE_VNI", true),
+		VNIStart:               envIntOrDefault("VNI_RANGE_START", defaultVNIStart),
+		VNIEnd:                 envIntOrDefault("VNI_RANGE_END", defaultVNIEnd),
 	}
 	if raw := os.Getenv("SYNC_PERIOD"); raw != "" {
 		parsed, err := time.ParseDuration(raw)
@@ -113,6 +131,12 @@ func loadAgentConfig() agentConfig {
 			log.Fatalf("parse SYNC_PERIOD %q: %v", raw, err)
 		}
 		cfg.SyncPeriod = parsed
+	}
+	if cfg.VNIStart <= 0 || cfg.VNIStart > 16777215 {
+		log.Fatalf("VNI_RANGE_START must be between 1 and 16777215, got %d", cfg.VNIStart)
+	}
+	if cfg.VNIEnd <= 0 || cfg.VNIEnd > 16777215 || cfg.VNIEnd < cfg.VNIStart {
+		log.Fatalf("VNI_RANGE_END must be between VNI_RANGE_START and 16777215, got %d", cfg.VNIEnd)
 	}
 	return cfg
 }
@@ -159,11 +183,11 @@ func run(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Int
 		case <-ctx.Done():
 			return ctx.Err()
 		case reason := <-trigger:
-			if err := reconcile(ctx, client, nadInformer, cfg); err != nil {
+			if err := reconcile(ctx, client, dynClient, nadInformer, cfg); err != nil {
 				log.Printf("reconcile failed reason=%q: %v", reason, err)
 			}
 		case <-ticker.C:
-			if err := reconcile(ctx, client, nadInformer, cfg); err != nil {
+			if err := reconcile(ctx, client, dynClient, nadInformer, cfg); err != nil {
 				log.Printf("reconcile failed reason=%q: %v", "periodic", err)
 			}
 		}
@@ -204,19 +228,29 @@ func subscribeLinkEvents(ctx context.Context, cfg agentConfig, trigger func(stri
 	}
 }
 
-func reconcile(ctx context.Context, client kubernetes.Interface, nadInformer cache.SharedIndexInformer, cfg agentConfig) error {
+func reconcile(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Interface, nadInformer cache.SharedIndexInformer, cfg agentConfig) error {
 	if cfg.DisableBridgeNetfilter {
 		if err := disableBridgeNetfilter(); err != nil {
 			return err
+		}
+	}
+	overlays := nadOverlays(nadInformer)
+	if cfg.AutoAllocateVNI {
+		if changed, err := allocateMissingVNIs(ctx, dynClient, overlays, cfg); err != nil {
+			return err
+		} else if changed {
+			return nil
 		}
 	}
 	desiredPeers, err := desiredNodeIPs(ctx, client, cfg.NodeName)
 	if err != nil {
 		return err
 	}
-	decls := declaredOverlays(nadInformer, cfg)
-	if err := ensureDeclaredOverlays(decls); err != nil {
-		return err
+	if cfg.PrewarmNADs {
+		decls := declaredOverlays(overlays, cfg)
+		if err := ensureDeclaredOverlays(decls); err != nil {
+			return err
+		}
 	}
 	vxlans, err := discoverVXLANs(cfg.VXLANPrefix)
 	if err != nil {
@@ -233,11 +267,11 @@ func reconcile(ctx context.Context, client kubernetes.Interface, nadInformer cac
 	return nil
 }
 
-func declaredOverlays(informer cache.SharedIndexInformer, cfg agentConfig) []overlayDecl {
+func nadOverlays(informer cache.SharedIndexInformer) []nadOverlay {
 	if informer == nil {
 		return nil
 	}
-	seen := map[string]overlayDecl{}
+	var overlays []nadOverlay
 	for _, item := range informer.GetStore().List() {
 		obj, ok := item.(*unstructured.Unstructured)
 		if !ok {
@@ -247,12 +281,33 @@ func declaredOverlays(informer cache.SharedIndexInformer, cfg agentConfig) []ove
 		if err != nil || !ok || strings.TrimSpace(rawConfig) == "" {
 			continue
 		}
-		decl, err := parseNADOverlay(rawConfig, cfg)
+		nad, err := parseNADConfig(rawConfig)
 		if err != nil {
 			if errors.Is(err, errNotCWMultinet) {
 				continue
 			}
 			log.Printf("skip nad=%s/%s: %v", obj.GetNamespace(), obj.GetName(), err)
+			continue
+		}
+		overlays = append(overlays, nadOverlay{
+			Namespace: obj.GetNamespace(),
+			Name:      obj.GetName(),
+			Config:    nad,
+			RawConfig: rawConfig,
+		})
+	}
+	return overlays
+}
+
+func declaredOverlays(overlays []nadOverlay, cfg agentConfig) []overlayDecl {
+	seen := map[string]overlayDecl{}
+	for _, overlay := range overlays {
+		if overlay.Config.VNI <= 0 {
+			continue
+		}
+		decl, err := overlayDeclFromConfig(overlay.Config, cfg)
+		if err != nil {
+			log.Printf("skip nad=%s/%s: %v", overlay.Namespace, overlay.Name, err)
 			continue
 		}
 		seen[decl.VXLANName] = decl
@@ -264,14 +319,21 @@ func declaredOverlays(informer cache.SharedIndexInformer, cfg agentConfig) []ove
 	return decls
 }
 
-func parseNADOverlay(raw string, cfg agentConfig) (overlayDecl, error) {
+func parseNADConfig(raw string) (nadConfig, error) {
 	nad := nadConfig{}
 	if err := json.Unmarshal([]byte(raw), &nad); err != nil {
-		return overlayDecl{}, fmt.Errorf("parse config: %w", err)
+		return nadConfig{}, fmt.Errorf("parse config: %w", err)
 	}
 	if nad.Type != "cw-multinet" {
-		return overlayDecl{}, errNotCWMultinet
+		return nadConfig{}, errNotCWMultinet
 	}
+	if nad.VNI < 0 || nad.VNI > 16777215 {
+		return nadConfig{}, fmt.Errorf("vni must be between 1 and 16777215 when set")
+	}
+	return nad, nil
+}
+
+func overlayDeclFromConfig(nad nadConfig, cfg agentConfig) (overlayDecl, error) {
 	if nad.VNI <= 0 || nad.VNI > 16777215 {
 		return overlayDecl{}, fmt.Errorf("vni is required and must be between 1 and 16777215")
 	}
@@ -304,6 +366,73 @@ func parseNADOverlay(raw string, cfg agentConfig) (overlayDecl, error) {
 		return overlayDecl{}, fmt.Errorf("vxlanName %q exceeds Linux 15 character interface limit", decl.VXLANName)
 	}
 	return decl, nil
+}
+
+func allocateMissingVNIs(ctx context.Context, dynClient dynamic.Interface, overlays []nadOverlay, cfg agentConfig) (bool, error) {
+	used := map[int]string{}
+	changed := false
+
+	for _, overlay := range overlays {
+		vni := overlay.Config.VNI
+		if vni <= 0 {
+			continue
+		}
+		owner := fmt.Sprintf("%s/%s", overlay.Namespace, overlay.Name)
+		if other, exists := used[vni]; exists && other != owner {
+			return false, fmt.Errorf("vni conflict: %s and %s both use vni %d", other, owner, vni)
+		}
+		used[vni] = owner
+	}
+
+	for _, overlay := range overlays {
+		if overlay.Config.VNI > 0 {
+			continue
+		}
+		vni, err := nextFreeVNI(used, cfg)
+		if err != nil {
+			return changed, err
+		}
+		owner := fmt.Sprintf("%s/%s", overlay.Namespace, overlay.Name)
+		updated := overlay.Config
+		updated.VNI = vni
+		if err := patchNADVNI(ctx, dynClient, overlay, updated); err != nil {
+			return changed, err
+		}
+		used[vni] = owner
+		changed = true
+		log.Printf("allocated vni=%d nad=%s", vni, owner)
+	}
+	return changed, nil
+}
+
+func nextFreeVNI(used map[int]string, cfg agentConfig) (int, error) {
+	for vni := cfg.VNIStart; vni <= cfg.VNIEnd; vni++ {
+		if _, exists := used[vni]; !exists {
+			return vni, nil
+		}
+	}
+	return 0, fmt.Errorf("no free VNI in range %d-%d", cfg.VNIStart, cfg.VNIEnd)
+}
+
+func patchNADVNI(ctx context.Context, dynClient dynamic.Interface, overlay nadOverlay, updated nadConfig) error {
+	updatedConfig, err := json.MarshalIndent(updated, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal updated NAD config %s/%s: %w", overlay.Namespace, overlay.Name, err)
+	}
+	patch := map[string]any{
+		"spec": map[string]any{
+			"config": string(updatedConfig),
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return fmt.Errorf("marshal patch for NAD %s/%s: %w", overlay.Namespace, overlay.Name, err)
+	}
+	_, err = dynClient.Resource(nadGVR).Namespace(overlay.Namespace).Patch(ctx, overlay.Name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+	if err != nil {
+		return fmt.Errorf("patch NAD %s/%s with allocated vni: %w", overlay.Namespace, overlay.Name, err)
+	}
+	return nil
 }
 
 func ensureDeclaredOverlays(decls []overlayDecl) error {
@@ -628,6 +757,18 @@ func envBoolOrDefault(key string, fallback bool) bool {
 		return fallback
 	}
 	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		log.Fatalf("parse %s %q: %v", key, value, err)
+	}
+	return parsed
+}
+
+func envIntOrDefault(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
 	if err != nil {
 		log.Fatalf("parse %s %q: %v", key, value, err)
 	}

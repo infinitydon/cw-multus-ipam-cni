@@ -59,6 +59,14 @@ spec:
               value: 30s
             - name: DISABLE_BRIDGE_NETFILTER
               value: "true"
+            - name: PREWARM_NADS
+              value: "false"
+            - name: AUTO_ALLOCATE_VNI
+              value: "true"
+            - name: VNI_RANGE_START
+              value: "10000"
+            - name: VNI_RANGE_END
+              value: "16777215"
           securityContext:
             privileged: true
       volumes:
@@ -83,7 +91,7 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["k8s.cni.cncf.io"]
     resources: ["network-attachment-definitions"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
