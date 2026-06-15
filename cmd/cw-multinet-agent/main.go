@@ -608,7 +608,7 @@ func garbageCollectOverlays(overlays []nadOverlay, cfg agentConfig) error {
 }
 
 func bridgeHasNoPodPorts(bridge netlink.Link, ignoreLinkName string) (bool, error) {
-	links, err := netlink.LinkList()
+	links, err := linkList()
 	if err != nil {
 		return false, fmt.Errorf("list links for bridge %s cleanup: %w", bridge.Attrs().Name, err)
 	}
@@ -622,6 +622,33 @@ func bridgeHasNoPodPorts(bridge netlink.Link, ignoreLinkName string) (bool, erro
 		return false, nil
 	}
 	return true, nil
+}
+
+func linkList() ([]netlink.Link, error) {
+	var (
+		links []netlink.Link
+		err   error
+	)
+	for attempt := 1; attempt <= 3; attempt++ {
+		links, err = netlink.LinkList()
+		if err == nil {
+			return links, nil
+		}
+		if !isTransientNetlinkDumpError(err) {
+			return links, err
+		}
+		time.Sleep(time.Duration(attempt) * 50 * time.Millisecond)
+	}
+	return links, err
+}
+
+func isTransientNetlinkDumpError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "incomplete or inconsistent") ||
+		strings.Contains(msg, "dump was interrupted")
 }
 
 func nextFreeVNI(used map[int]string, cfg agentConfig) (int, error) {
@@ -837,7 +864,7 @@ func nodeReady(node corev1.Node) bool {
 }
 
 func discoverVXLANs(prefix string) ([]netlink.Link, error) {
-	links, err := netlink.LinkList()
+	links, err := linkList()
 	if err != nil {
 		return nil, fmt.Errorf("list links: %w", err)
 	}
