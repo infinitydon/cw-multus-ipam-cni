@@ -27,7 +27,7 @@ spec:
       containers:
         - name: installer
           image: ghcr.io/infinitydon/cw-multus-ipam-cni:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command:
             - /bin/sh
             - -c
@@ -43,7 +43,7 @@ spec:
               mountPath: /host
         - name: agent
           image: ghcr.io/infinitydon/cw-multus-ipam-cni:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command:
             - /cw-multinet-agent
           env:
