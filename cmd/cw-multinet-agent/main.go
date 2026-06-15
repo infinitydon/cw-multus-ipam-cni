@@ -415,7 +415,12 @@ func nextFreeVNI(used map[int]string, cfg agentConfig) (int, error) {
 }
 
 func patchNADVNI(ctx context.Context, dynClient dynamic.Interface, overlay nadOverlay, updated nadConfig) error {
-	updatedConfig, err := json.MarshalIndent(updated, "", "  ")
+	var config map[string]any
+	if err := json.Unmarshal([]byte(overlay.RawConfig), &config); err != nil {
+		return fmt.Errorf("parse original NAD config %s/%s: %w", overlay.Namespace, overlay.Name, err)
+	}
+	config["vni"] = updated.VNI
+	updatedConfig, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal updated NAD config %s/%s: %w", overlay.Namespace, overlay.Name, err)
 	}
