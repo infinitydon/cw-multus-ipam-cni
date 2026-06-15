@@ -305,10 +305,14 @@ func ensureVxlan(conf *netConf, bridgeIndex int) (netlink.Link, error) {
 	if err := netlink.LinkAdd(vxlan); err != nil {
 		return nil, fmt.Errorf("add vxlan %s vni %d: %w", conf.VxlanName, conf.VNI, err)
 	}
-	if err := enslaveAndRaise(vxlan, bridgeIndex, conf.MTU); err != nil {
+	link, err = netlink.LinkByName(conf.VxlanName)
+	if err != nil {
+		return nil, fmt.Errorf("lookup created vxlan %s: %w", conf.VxlanName, err)
+	}
+	if err := enslaveAndRaise(link, bridgeIndex, conf.MTU); err != nil {
 		return nil, err
 	}
-	return vxlan, nil
+	return link, nil
 }
 
 func enslaveAndRaise(link netlink.Link, masterIndex, mtu int) error {
