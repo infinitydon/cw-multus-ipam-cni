@@ -10,7 +10,6 @@ spec:
       "name": "n2-static",
       "type": "cw-multinet",
       "vni": 2002,
-      "peers": ["10.176.244.201", "10.176.243.1"],
       "ipam": {
         "type": "static",
         "addresses": [

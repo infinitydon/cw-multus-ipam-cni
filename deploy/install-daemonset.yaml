@@ -19,13 +19,14 @@ spec:
       labels:
         app.kubernetes.io/name: cw-multinet-cni
     spec:
+      serviceAccountName: cw-multinet-agent
       hostNetwork: true
       priorityClassName: system-node-critical
       tolerations:
         - operator: Exists
       containers:
         - name: installer
-          image: ghcr.io/replace-me/cw-multus-ipam-cni:latest
+          image: ghcr.io/infinitydon/cw-multus-ipam-cni:latest
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
@@ -40,8 +41,52 @@ spec:
           volumeMounts:
             - name: host-root
               mountPath: /host
+        - name: agent
+          image: ghcr.io/infinitydon/cw-multus-ipam-cni:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /cw-multinet-agent
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: VXLAN_PREFIX
+              value: vx-cwm-
+            - name: SYNC_PERIOD
+              value: 10s
+          securityContext:
+            privileged: true
       volumes:
         - name: host-root
           hostPath:
             path: /
             type: Directory
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cw-multinet-agent
+  namespace: cw-multinet-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cw-multinet-agent
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cw-multinet-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cw-multinet-agent
+subjects:
+  - kind: ServiceAccount
+    name: cw-multinet-agent
+    namespace: cw-multinet-system

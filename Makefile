@@ -3,6 +3,7 @@ IMAGE ?= ghcr.io/replace-me/cw-multus-ipam-cni:latest
 .PHONY: build
 build:
 	go build -o bin/cw-multinet ./cmd/cw-multinet
+	go build -o bin/cw-multinet-agent ./cmd/cw-multinet-agent
 
 .PHONY: test
 test:

@@ -31,6 +31,6 @@ Whereabouts is the recommended dynamic allocator when addresses must be unique a
 
 ## Reachability Boundary
 
-The plugin creates an L2 overlay, but it still needs a way to know remote VTEP addresses. The current implementation accepts an explicit `peers` list in each NAD. A production follow-up should add a small node watcher or generated ConfigMap workflow so peer membership updates automatically as nodes scale.
+The plugin creates an L2 overlay. A companion `cw-multinet-agent` DaemonSet watches Kubernetes Nodes, extracts Ready node InternalIPs, and reconciles VXLAN flood FDB entries on every host so joins, removals, and readiness changes are reflected without editing NADs.
 
 All nodes must be able to send UDP VXLAN traffic to each peer on `vxlanPort`, default `4789`.

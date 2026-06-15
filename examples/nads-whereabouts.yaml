@@ -10,7 +10,6 @@ spec:
       "name": "n2-whereabouts",
       "type": "cw-multinet",
       "vni": 3002,
-      "peers": ["10.176.244.201", "10.176.243.1"],
       "ipam": {
         "type": "whereabouts",
         "range": "10.30.2.0/24",
@@ -30,7 +29,6 @@ spec:
       "name": "n3-whereabouts",
       "type": "cw-multinet",
       "vni": 3003,
-      "peers": ["10.176.244.201", "10.176.243.1"],
       "ipam": {
         "type": "whereabouts",
         "range": "10.30.3.0/24",
@@ -50,7 +48,6 @@ spec:
       "name": "n4-whereabouts",
       "type": "cw-multinet",
       "vni": 3004,
-      "peers": ["10.176.244.201", "10.176.243.1"],
       "ipam": {
         "type": "whereabouts",
         "range": "10.30.4.0/24",
@@ -70,7 +67,6 @@ spec:
       "name": "n6-whereabouts",
       "type": "cw-multinet",
       "vni": 3006,
-      "peers": ["10.176.244.201", "10.176.243.1"],
       "ipam": {
         "type": "whereabouts",
         "range": "10.30.6.0/24",

@@ -10,7 +10,6 @@ spec:
       "name": "n2-hostlocal",
       "type": "cw-multinet",
       "vni": 2002,
-      "peers": ["10.176.244.201", "10.176.243.1"],
       "ipam": {
         "type": "host-local",
         "ranges": [[{ "subnet": "10.20.2.0/24", "rangeStart": "10.20.2.20", "rangeEnd": "10.20.2.250" }]],
@@ -30,7 +29,6 @@ spec:
       "name": "n3-hostlocal",
       "type": "cw-multinet",
       "vni": 2003,
-      "peers": ["10.176.244.201", "10.176.243.1"],
       "ipam": {
         "type": "host-local",
         "ranges": [[{ "subnet": "10.20.3.0/24", "rangeStart": "10.20.3.20", "rangeEnd": "10.20.3.250" }]],
@@ -50,7 +48,6 @@ spec:
       "name": "n4-hostlocal",
       "type": "cw-multinet",
       "vni": 2004,
-      "peers": ["10.176.244.201", "10.176.243.1"],
       "ipam": {
         "type": "host-local",
         "ranges": [[{ "subnet": "10.20.4.0/24", "rangeStart": "10.20.4.20", "rangeEnd": "10.20.4.250" }]],
@@ -70,7 +67,6 @@ spec:
       "name": "n6-hostlocal",
       "type": "cw-multinet",
       "vni": 2006,
-      "peers": ["10.176.244.201", "10.176.243.1"],
       "ipam": {
         "type": "host-local",
         "ranges": [[{ "subnet": "10.20.6.0/24", "rangeStart": "10.20.6.20", "rangeEnd": "10.20.6.250" }]],
