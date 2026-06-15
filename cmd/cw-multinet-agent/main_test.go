@@ -34,7 +34,10 @@ func TestAllocateMissingVNIsPreservesNADConfig(t *testing.T) {
 	}
 	client := fake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		nadGVR: "NetworkAttachmentDefinitionList",
-	}, nadObject("default", "auto-net", rawConfig))
+	})
+	if _, err := client.Resource(nadGVR).Namespace("default").Create(context.Background(), nadObject("default", "auto-net", rawConfig), metav1.CreateOptions{}); err != nil {
+		t.Fatalf("seed NAD: %v", err)
+	}
 
 	changed, err := allocateMissingVNIs(context.Background(), client, []nadOverlay{overlay}, []localOverlay{{VNI: 10000, VXLANName: "vx-cwm-10000"}}, agentConfig{
 		VNIStart: 10000,
