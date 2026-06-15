@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-NAMESPACE="${NAMESPACE:-free5gc-cwm}"
+NAMESPACE="${NAMESPACE:-core5g}"
 PACKETRUSHER_SELECTOR="${PACKETRUSHER_SELECTOR:-app=packetrusher}"
 SERVER_IP="${SERVER_IP:-10.200.6.10}"
 UE_IP="${UE_IP:-10.63.0.1}"

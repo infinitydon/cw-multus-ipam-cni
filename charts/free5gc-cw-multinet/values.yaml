@@ -12,7 +12,7 @@ cwMultinet:
   vxlanPort: 14789
 
 gtp5g:
-  version: "v0.9.5"
+  version: "v0.9.14"
 
 plmn:
   mcc: 208

@@ -18,6 +18,10 @@ iperf3:
 
 The server keeps running as a Deployment named `<release>-iperf3-server`. It adds a route back to the UE pool through the UPF N6 address, then listens on the N6 address.
 
+## gtp5g compatibility
+
+The chart defaults to `gtp5g.version=v0.9.14`. Keep this aligned with the deployed free5GC UPF image. If the UPF logs show `CreatePDR`, `CreateFAR`, or `CreateQER` errors, stop PacketRusher/UPF traffic, upgrade the module version, restart UPF/SMF/AMF, and then start PacketRusher again so stale PDU session state is cleared.
+
 Run the PacketRusher client from the repository root:
 
 ```sh
