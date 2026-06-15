@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,10 +31,11 @@ const (
 var floodMAC = net.HardwareAddr{0, 0, 0, 0, 0, 0}
 
 type agentConfig struct {
-	VXLANPrefix  string
-	BridgePrefix string
-	SyncPeriod   time.Duration
-	NodeName     string
+	VXLANPrefix            string
+	BridgePrefix           string
+	SyncPeriod             time.Duration
+	NodeName               string
+	DisableBridgeNetfilter bool
 }
 
 func main() {
@@ -45,7 +47,7 @@ func main() {
 		log.Fatalf("create kubernetes client: %v", err)
 	}
 
-	log.Printf("starting cw-multinet-agent vxlanPrefix=%s bridgePrefix=%s syncPeriod=%s nodeName=%s", cfg.VXLANPrefix, cfg.BridgePrefix, cfg.SyncPeriod, cfg.NodeName)
+	log.Printf("starting cw-multinet-agent vxlanPrefix=%s bridgePrefix=%s syncPeriod=%s nodeName=%s disableBridgeNetfilter=%t", cfg.VXLANPrefix, cfg.BridgePrefix, cfg.SyncPeriod, cfg.NodeName, cfg.DisableBridgeNetfilter)
 	if err := run(context.Background(), client, cfg); err != nil {
 		log.Fatalf("agent stopped: %v", err)
 	}
@@ -53,10 +55,11 @@ func main() {
 
 func loadAgentConfig() agentConfig {
 	cfg := agentConfig{
-		VXLANPrefix:  envOrDefault("VXLAN_PREFIX", defaultVXLANPrefix),
-		BridgePrefix: envOrDefault("BRIDGE_PREFIX", defaultBridgePrefix),
-		SyncPeriod:   defaultSyncPeriod,
-		NodeName:     os.Getenv("NODE_NAME"),
+		VXLANPrefix:            envOrDefault("VXLAN_PREFIX", defaultVXLANPrefix),
+		BridgePrefix:           envOrDefault("BRIDGE_PREFIX", defaultBridgePrefix),
+		SyncPeriod:             defaultSyncPeriod,
+		NodeName:               os.Getenv("NODE_NAME"),
+		DisableBridgeNetfilter: envBoolOrDefault("DISABLE_BRIDGE_NETFILTER", true),
 	}
 	if raw := os.Getenv("SYNC_PERIOD"); raw != "" {
 		parsed, err := time.ParseDuration(raw)
@@ -85,6 +88,11 @@ func run(ctx context.Context, client kubernetes.Interface, cfg agentConfig) erro
 }
 
 func reconcile(ctx context.Context, client kubernetes.Interface, cfg agentConfig) error {
+	if cfg.DisableBridgeNetfilter {
+		if err := disableBridgeNetfilter(); err != nil {
+			return err
+		}
+	}
 	desiredPeers, err := desiredNodeIPs(ctx, client, cfg.NodeName)
 	if err != nil {
 		return err
@@ -100,6 +108,29 @@ func reconcile(ctx context.Context, client kubernetes.Interface, cfg agentConfig
 		if err := reconcileFDB(vxlan, desiredPeers); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func disableBridgeNetfilter() error {
+	for _, path := range []string{
+		"/proc/sys/net/bridge/bridge-nf-call-iptables",
+		"/proc/sys/net/bridge/bridge-nf-call-ip6tables",
+	} {
+		current, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("read %s: %w", path, err)
+		}
+		if strings.TrimSpace(string(current)) == "0" {
+			continue
+		}
+		if err := os.WriteFile(path, []byte("0\n"), 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
+		log.Printf("set %s=0", path)
 	}
 	return nil
 }
@@ -282,6 +313,18 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func envBoolOrDefault(key string, fallback bool) bool {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		log.Fatalf("parse %s %q: %v", key, value, err)
+	}
+	return parsed
 }
 
 func isNotFound(err error) bool {

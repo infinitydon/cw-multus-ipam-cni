@@ -115,6 +115,8 @@ All nodes must be able to send UDP VXLAN traffic to all configured peer node IPs
 
 The `cw-multinet-agent` DaemonSet watches Kubernetes Nodes, extracts Ready node `InternalIP` addresses, and reconciles VXLAN flood FDB entries on every host. New Ready nodes are added as peers; removed or NotReady nodes are deleted as peers.
 
+The agent also disables Linux bridge netfilter by default (`net.bridge.bridge-nf-call-iptables=0` and `net.bridge.bridge-nf-call-ip6tables=0`). This is required for transparent L2 behavior on CoreWeave/Cilium because bridged secondary-plane packets otherwise traverse host iptables/Cilium masquerade rules and can have their source rewritten.
+
 ## Sample Cluster Notes
 
 The provided kubeconfig points to a two-node CoreWeave cluster with:

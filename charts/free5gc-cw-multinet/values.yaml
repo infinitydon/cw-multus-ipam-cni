@@ -28,6 +28,8 @@ webui:
     repository: free5gc/webui
     pullPolicy: IfNotPresent
     tag: v4.0.1
+  service:
+    nodePort: 30510
 
 mongodb:
   image:

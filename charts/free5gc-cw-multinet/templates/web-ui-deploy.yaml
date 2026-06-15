@@ -9,7 +9,7 @@ spec:
   ports:
     - port: 5000
       targetPort: 5000
-      nodePort: 30500
+      nodePort: {{ .Values.webui.service.nodePort }}
   selector:
     epc-mode: webui
 ---

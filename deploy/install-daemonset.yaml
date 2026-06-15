@@ -57,6 +57,8 @@ spec:
               value: br-cwm-
             - name: SYNC_PERIOD
               value: 30s
+            - name: DISABLE_BRIDGE_NETFILTER
+              value: "true"
           securityContext:
             privileged: true
       volumes:
