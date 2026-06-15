@@ -156,6 +156,17 @@ upf:
     multusNetworkMask: "24"
     multusNetworkAddress: "10.200.6.0"
 
+iperf3:
+  enabled: true
+  image:
+    repository: ghcr.io/nicolaka/netshoot
+    pullPolicy: IfNotPresent
+    tag: latest
+  port: 5201
+  n6:
+    multusIP: "10.200.6.10"
+    multusNetworkMask: "24"
+
 subprov:
   username: admin
   password: free5gc

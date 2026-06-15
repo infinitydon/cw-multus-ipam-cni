@@ -1,0 +1,45 @@
+{{- if .Values.iperf3.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-iperf3-server
+  labels:
+    app: iperf3-server
+    epc-mode: iperf3-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: iperf3-server
+  template:
+    metadata:
+      labels:
+        app: iperf3-server
+        epc-mode: iperf3-server
+      annotations:
+        k8s.v1.cni.cncf.io/networks: '[
+          { "name": "{{ .Release.Name }}-core-n6-nad",
+            "interface": "n6",
+            "ips": [ {{- cat .Values.iperf3.n6.multusIP "/" .Values.iperf3.n6.multusNetworkMask | nospace | quote }} ] }
+        ]'
+    spec:
+      containers:
+      - name: iperf3
+        image: "{{ .Values.iperf3.image.repository }}:{{ .Values.iperf3.image.tag }}"
+        imagePullPolicy: {{ .Values.iperf3.image.pullPolicy }}
+        command:
+        - /bin/sh
+        - -c
+        args:
+        - |
+          ip route replace {{ .Values.ueIPpool1 }} via {{ .Values.upf.n6.multusIP }} dev n6
+          exec iperf3 -s -B {{ .Values.iperf3.n6.multusIP }} -p {{ .Values.iperf3.port }}
+        ports:
+        - name: iperf3
+          containerPort: {{ .Values.iperf3.port }}
+          protocol: TCP
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+{{- end }}
