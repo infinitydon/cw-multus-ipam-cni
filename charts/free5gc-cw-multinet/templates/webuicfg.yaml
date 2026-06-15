@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-webui-config
+  labels:
+    epc-mode: webui
+data:
+  webuicfg.yaml: |
+    info:
+      version: 1.0.3
+      description: WEBUI initial local configuration
+
+    configuration:
+      mongodb:
+        name: free5gc
+        url: mongodb://{{ .Release.Name }}-mongodb-svc:27017 # a valid URL of the mongodb
+      nrfUri: http://{{ .Release.Name }}-nrf.{{ .Release.Namespace }}:8000 # a valid URI of NRF
+      nrfCertPem: cert/nrf.pem
+      webServer:
+        scheme: http
+        ipv4Address: 0.0.0.0
+        port: 5000
+      billingServer:
+        enable: true
+        hostIPv4: 0.0.0.0
+        listenPort: 2121
+        portRange: # passive port range
+          start: 2123
+          end: 2130
+        basePath: /tmp/webconsole
+        port: 2122
+        tls:
+          pem: ./cert/chf.pem
+          key: ./cert/chf.key
+        
+    logger: # log output setting
+      enable: true # true or false
+      level: info # how detailed to output, value: trace, debug, info, warn, error, fatal, panic
+      reportCaller: false # enable the caller report or not, value: true or false    

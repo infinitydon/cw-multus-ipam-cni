@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-packetrusher
+  labels:
+    app: packetrusher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: packetrusher
+  template:
+    metadata:
+      labels:
+        app: packetrusher
+      annotations:
+        k8s.v1.cni.cncf.io/networks: '[
+          { "name": "{{ $.Values.coreDeploymentName }}-core-n2-nad", "interface": "n2", "ips": [ {{- cat .Values.config.n2network.ipAddress "/" .Values.config.n2network.networkMask | nospace | quote }} ] },
+          { "name": "{{ $.Values.coreDeploymentName }}-core-n3-nad", "interface": "n3", "ips": [ {{- cat .Values.config.n3network.ipAddress "/" .Values.config.n3network.networkMask | nospace | quote }} ] }
+        ]'
+    spec:
+      serviceAccountName: {{ .Release.Name }}-k8s-wait-for
+      initContainers:
+      - name: wait-for-amf
+        image: "{{ .Values.k8swait.repository }}:{{ .Values.k8swait.tag }}"
+        imagePullPolicy: {{ .Values.k8swait.pullPolicy }}
+        args:
+          - "pod"
+          - "-lepc-mode=amf"
+      containers:
+        - name: packetrusher
+          image: "{{ .Values.image.repository}}:{{ .Values.image.tag}}"
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}        
+          command: ["/bin/sh", "-c"]
+          args: 
+          - ./packetrusher --config /PacketRusher/config/config.yml ue
+          securityContext:
+            privileged: true
+          ports:
+            - name: ngap
+              containerPort: {{ .Values.containerPorts.ngap }}
+              protocol: SCTP
+            - name: gtpu
+              containerPort: {{ .Values.containerPorts.gtpu }}
+              protocol: UDP
+          volumeMounts:
+            - name: config
+              mountPath: /PacketRusher/config/config.yml
+              subPath: "config.yml"
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-packetrusher

@@ -1,0 +1,68 @@
+#
+# Software Name : towards5gs-helm
+# SPDX-FileCopyrightText: Copyright (c) 2021 Orange
+# SPDX-License-Identifier: Apache-2.0
+#
+# This software is distributed under the Apache License 2.0,
+# the text of which is available at todo
+# or see the "LICENSE" file for more details.
+#
+# Author: Abderaouf KHICHANE, Ilhem FAJJARI, Ayoub BOUSSELMI
+# Software description: An open-source project providing Helm charts to deploy 5G components (Core + RAN) on top of Kubernetes
+#
+# Default values for ueransim-chart.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+coreDeploymentName: core5g
+
+image:
+  registry: docker.io
+  repository: gradiant/packetrusher
+  tag: "2b26573"
+  digest: ""
+  pullPolicy: IfNotPresent
+
+config:
+  n2network:
+    enabled: true
+    ipAddress: 10.200.2.3
+    networkMask: "24"
+  n3network:
+    enabled: true
+    ipAddress: 10.200.3.3
+    networkMask: "24"
+  amf:
+    ipAddress: 10.200.2.2
+  gnb:
+    mcc: "208"
+    mnc: "93"
+    tac: "000001"
+    gnbid: "000008"
+    sst: "01"
+    sd: "112233"
+  ue:
+    msin: "0000000003"
+    key: "8baf473f2f8fd09487cccbd7097c6862"
+    opc: "8e27b6af0e692e750f32667a3b14605d"
+    dnn: "internet"
+    hplmn:
+      mcc: "208"
+      mnc: "93"
+    sst: "01"
+    sd: "112233"
+
+containerPorts:
+  ngap: 9487
+  gtpu: 2152
+containerSecurityContext:
+  enabled: true
+  runAsNonRoot: false
+  privileged: true
+  capabilities:
+    add: ["NET_ADMIN"]
+
+k8swait:
+  repository: groundnuty/k8s-wait-for #groundnuty/k8s-wait-for
+  tag: v1.6
+  pullPolicy: IfNotPresent 

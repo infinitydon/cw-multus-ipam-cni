@@ -101,7 +101,6 @@ func reconcile(ctx context.Context, client kubernetes.Interface, cfg agentConfig
 			return err
 		}
 	}
-	log.Printf("reconciled peers=%d vxlanLinks=%d", len(desiredPeers), len(vxlans))
 	return nil
 }
 

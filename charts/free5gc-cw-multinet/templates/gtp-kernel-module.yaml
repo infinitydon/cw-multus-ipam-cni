@@ -1,0 +1,131 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}-gtp5g-installer
+  labels:
+    app: gtp5g-installer
+spec:
+  selector:
+    matchLabels:
+      app: gtp5g-installer
+  template:
+    metadata:
+      labels:
+        app: gtp5g-installer
+    spec:
+      hostPID: true
+      hostNetwork: true
+      initContainers:
+        - name: gtp5g-installer
+          image: ubuntu:24.04
+          securityContext:
+            privileged: true
+            capabilities:
+              add:
+                - SYS_MODULE
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              KERNEL_VERSION=$(uname -r)
+              DESIRED_VERSION="{{ .Values.gtp5g.version }}"
+              echo "Kernel version: ${KERNEL_VERSION}"
+              echo "Desired gtp5g version: ${DESIRED_VERSION}"
+
+              # Check if already loaded
+              if grep -q "^gtp5g" /proc/modules 2>/dev/null; then
+                # Get currently installed version from /lib/modules
+                INSTALLED_VERSION=""
+                if [ -f /lib/modules/${KERNEL_VERSION}/gtp5g.ko ]; then
+                  # Extract version from .ko modinfo via strings
+                  INSTALLED_VERSION=$(strings /lib/modules/${KERNEL_VERSION}/gtp5g.ko \
+                    | grep "^version=" | cut -d= -f2 || true)
+                fi
+                echo "Currently loaded gtp5g version: ${INSTALLED_VERSION}"
+
+                # Strip leading 'v' for comparison
+                DESIRED_CLEAN=$(echo ${DESIRED_VERSION} | sed 's/^v//')
+                INSTALLED_CLEAN=$(echo ${INSTALLED_VERSION} | sed 's/^v//')
+
+                if [ "${DESIRED_CLEAN}" = "${INSTALLED_CLEAN}" ]; then
+                  echo "gtp5g ${DESIRED_VERSION} already loaded, skipping"
+                  exit 0
+                fi
+
+                echo "Version mismatch — unloading current gtp5g ${INSTALLED_VERSION}"
+                nsenter --target 1 --mount -- rmmod gtp5g || {
+                  echo "ERROR: Failed to unload gtp5g — is it in use by a running UPF?"
+                  echo "Scale down UPF pods first, then re-run this installer"
+                  exit 1
+                }
+                echo "gtp5g unloaded successfully"
+              fi
+
+              # Headers mounted from host /usr/src into /host-usr-src
+              KHEADERS=/host-usr-src/linux-headers-${KERNEL_VERSION}
+              echo "Using kernel headers at ${KHEADERS}"
+
+              if [ ! -d "${KHEADERS}" ]; then
+                echo "ERROR: Kernel headers not found at ${KHEADERS}"
+                echo "Available under /host-usr-src:"
+                ls /host-usr-src/ || true
+                exit 1
+              fi
+
+              # Install build tools including libelf-dev for objtool
+              apt-get update -qq
+              apt-get install -y --no-install-recommends \
+                gcc make git kmod ca-certificates \
+                libelf-dev binutils
+
+              # Clone and build desired version
+              git clone -b ${DESIRED_VERSION} \
+                https://github.com/free5gc/gtp5g.git /tmp/gtp5g
+
+              cd /tmp/gtp5g
+              make KDIR=${KHEADERS}
+
+              # Install .ko into host /lib/modules
+              cp gtp5g.ko /lib/modules/${KERNEL_VERSION}/
+              nsenter --target 1 --mount -- depmod -a
+
+              # Load into host kernel via nsenter
+              nsenter --target 1 --mount -- insmod /lib/modules/${KERNEL_VERSION}/gtp5g.ko
+
+              # Verify using /proc/modules
+              if grep -q "^gtp5g" /proc/modules; then
+                echo "gtp5g loaded successfully"
+                grep "^gtp5g" /proc/modules
+              else
+                echo "ERROR: gtp5g failed to load"
+                exit 1
+              fi
+          volumeMounts:
+            - name: lib-modules
+              mountPath: /lib/modules
+            - name: host-usr-src
+              mountPath: /host-usr-src
+              readOnly: true
+            - name: host-proc
+              mountPath: /proc
+      containers:
+        - name: pause
+          image: gcr.io/google-containers/pause:3.2
+          securityContext:
+            privileged: false
+      volumes:
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
+        - name: host-usr-src
+          hostPath:
+            path: /usr/src
+        - name: host-proc
+          hostPath:
+            path: /proc
+      tolerations:
+        - operator: Exists
+          effect: NoSchedule
+        - operator: Exists
+          effect: NoExecute
