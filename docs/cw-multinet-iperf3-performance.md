@@ -4,7 +4,7 @@ This test measures `cw-multinet` directly, outside of free5GC and PacketRusher. 
 
 ## Test Environment
 
-- Cluster kubeconfig: `/Users/cadigun/Downloads/CWKubeconfig_eben-cluster04`
+- Cluster: CoreWeave test cluster
 - Date: 2026-06-15
 - Namespace: `cw-multinet-perf`
 - Server node: `g46cd14`
@@ -25,19 +25,17 @@ The temporary manifest used for this test is stored at `examples/iperf3-cw-multi
 ## Deployment
 
 ```sh
-KUBECONFIG=/Users/cadigun/Downloads/CWKubeconfig_eben-cluster04 \
-  kubectl apply -f examples/iperf3-cw-multinet-perf.yaml
+export KUBECONFIG=/path/to/kubeconfig
+kubectl apply -f examples/iperf3-cw-multinet-perf.yaml
 
-KUBECONFIG=/Users/cadigun/Downloads/CWKubeconfig_eben-cluster04 \
-  kubectl -n cw-multinet-perf wait --for=condition=Ready \
+kubectl -n cw-multinet-perf wait --for=condition=Ready \
   pod/iperf3-server pod/iperf3-client --timeout=180s
 ```
 
 The test namespace was deleted after the results were captured:
 
 ```sh
-KUBECONFIG=/Users/cadigun/Downloads/CWKubeconfig_eben-cluster04 \
-  kubectl delete namespace cw-multinet-perf
+kubectl delete namespace cw-multinet-perf
 ```
 
 ## Interface Validation

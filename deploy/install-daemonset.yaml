@@ -51,6 +51,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: VXLAN_PREFIX
               value: vx-cwm-
             - name: BRIDGE_PREFIX
@@ -63,6 +67,10 @@ spec:
               value: "false"
             - name: AUTO_ALLOCATE_VNI
               value: "true"
+            - name: ALLOCATOR_LEADER_ELECTION
+              value: "true"
+            - name: ALLOCATOR_LEASE_NAME
+              value: cw-multinet-vni-allocator
             - name: VNI_RANGE_START
               value: "10000"
             - name: VNI_RANGE_END
@@ -92,6 +100,9 @@ rules:
   - apiGroups: ["k8s.cni.cncf.io"]
     resources: ["network-attachment-definitions"]
     verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

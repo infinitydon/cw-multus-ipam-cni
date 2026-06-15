@@ -37,7 +37,7 @@ Each telco plane should use a distinct VNI. For example:
 make build
 ```
 
-The module currently requires Go 1.24.2 or newer.
+The module currently requires Go 1.26.0 or newer.
 
 ## Install
 
@@ -113,7 +113,9 @@ Whereabouts is the recommended dynamic allocator when addresses must be unique a
 
 Operators may set `vni` explicitly when a deterministic VNI is required. If `vni` is omitted, the `cw-multinet-agent` allocates one from `VNI_RANGE_START` to `VNI_RANGE_END` and patches the NAD `spec.config` so every node and future pod sees the same explicit value.
 
-The default allocation range is `10000-16777215`. The agent detects duplicate explicit VNIs and reports a conflict instead of silently reusing the same overlay.
+The default allocation range is `10000-16777215`. Allocation is single-writer by default: DaemonSet agents participate in a Kubernetes Lease election and only the current leader patches missing VNIs. All agents still validate duplicate explicit VNIs and report conflicts instead of silently reusing the same overlay.
+
+When a NAD is deleted, each node garbage-collects stale `vx-cwm-*` and `br-cwm-*` devices after the bridge has no remaining pod ports. This avoids deleting an overlay that is still serving a live pod during namespace or workload teardown.
 
 Pre-warming NAD-declared overlays is disabled by default (`PREWARM_NADS=false`). The default behavior is lazy CNI creation plus event-driven agent reconciliation. Set `PREWARM_NADS=true` only when you intentionally want every live cw-multinet NAD instantiated on every node before pods attach.
 

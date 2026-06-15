@@ -21,7 +21,8 @@ The server keeps running as a Deployment named `<release>-iperf3-server`. It add
 Run the PacketRusher client from the repository root:
 
 ```sh
-KUBECONFIG=/Users/cadigun/Downloads/CWKubeconfig_eben-cluster04 ./scripts/run-packetrusher-iperf3.sh
+export KUBECONFIG=/path/to/kubeconfig
+./scripts/run-packetrusher-iperf3.sh
 ```
 
 See `docs/iperf3-validation.md` for the live CoreWeave validation report.

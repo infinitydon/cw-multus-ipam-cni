@@ -50,8 +50,8 @@ iperf3 -s -B 10.200.6.10 -p 5201
 Run the client from PacketRusher's UE VRF:
 
 ```sh
-KUBECONFIG=/Users/cadigun/Downloads/CWKubeconfig_eben-cluster04 \
-  NAMESPACE=free5gc-cwm \
+export KUBECONFIG=/path/to/kubeconfig
+NAMESPACE=free5gc-cwm \
   SERVER_IP=10.200.6.10 \
   UE_IP=10.63.0.1 \
   VRF=vrf0000000003 \
@@ -62,7 +62,7 @@ KUBECONFIG=/Users/cadigun/Downloads/CWKubeconfig_eben-cluster04 \
 
 ## Live Test Report
 
-Cluster: CoreWeave test cluster from `/Users/cadigun/Downloads/CWKubeconfig_eben-cluster04`
+Cluster: CoreWeave test cluster
 
 Namespace: `free5gc-cwm`
 
@@ -97,7 +97,8 @@ n6@if19621       UP             10.200.6.10/24
 Client command used:
 
 ```sh
-KUBECONFIG=/Users/cadigun/Downloads/CWKubeconfig_eben-cluster04 ./scripts/run-packetrusher-iperf3.sh
+export KUBECONFIG=/path/to/kubeconfig
+./scripts/run-packetrusher-iperf3.sh
 ```
 
 Client result:

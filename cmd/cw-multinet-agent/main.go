@@ -9,8 +9,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -25,6 +27,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -36,20 +40,24 @@ const (
 	defaultSyncPeriod   = 15 * time.Second
 	defaultVNIStart     = 10000
 	defaultVNIEnd       = 16777215
+	defaultLeaseName    = "cw-multinet-vni-allocator"
 )
 
 var floodMAC = net.HardwareAddr{0, 0, 0, 0, 0, 0}
 
 type agentConfig struct {
-	VXLANPrefix            string
-	BridgePrefix           string
-	SyncPeriod             time.Duration
-	NodeName               string
-	DisableBridgeNetfilter bool
-	PrewarmNADs            bool
-	AutoAllocateVNI        bool
-	VNIStart               int
-	VNIEnd                 int
+	VXLANPrefix             string
+	BridgePrefix            string
+	SyncPeriod              time.Duration
+	NodeName                string
+	DisableBridgeNetfilter  bool
+	PrewarmNADs             bool
+	AutoAllocateVNI         bool
+	AllocatorLeaderElection bool
+	AllocatorLeaseNamespace string
+	AllocatorLeaseName      string
+	VNIStart                int
+	VNIEnd                  int
 }
 
 type overlayDecl struct {
@@ -61,6 +69,14 @@ type overlayDecl struct {
 	UnderlayIface   string
 	SourceAddress   string
 	DisableLearning bool
+}
+
+type localOverlay struct {
+	VNI        int
+	BridgeName string
+	VXLANName  string
+	VXLAN      netlink.Link
+	Bridge     netlink.Link
 }
 
 type nadConfig struct {
@@ -115,15 +131,18 @@ func main() {
 
 func loadAgentConfig() agentConfig {
 	cfg := agentConfig{
-		VXLANPrefix:            envOrDefault("VXLAN_PREFIX", defaultVXLANPrefix),
-		BridgePrefix:           envOrDefault("BRIDGE_PREFIX", defaultBridgePrefix),
-		SyncPeriod:             defaultSyncPeriod,
-		NodeName:               os.Getenv("NODE_NAME"),
-		DisableBridgeNetfilter: envBoolOrDefault("DISABLE_BRIDGE_NETFILTER", true),
-		PrewarmNADs:            envBoolOrDefault("PREWARM_NADS", false),
-		AutoAllocateVNI:        envBoolOrDefault("AUTO_ALLOCATE_VNI", true),
-		VNIStart:               envIntOrDefault("VNI_RANGE_START", defaultVNIStart),
-		VNIEnd:                 envIntOrDefault("VNI_RANGE_END", defaultVNIEnd),
+		VXLANPrefix:             envOrDefault("VXLAN_PREFIX", defaultVXLANPrefix),
+		BridgePrefix:            envOrDefault("BRIDGE_PREFIX", defaultBridgePrefix),
+		SyncPeriod:              defaultSyncPeriod,
+		NodeName:                os.Getenv("NODE_NAME"),
+		DisableBridgeNetfilter:  envBoolOrDefault("DISABLE_BRIDGE_NETFILTER", true),
+		PrewarmNADs:             envBoolOrDefault("PREWARM_NADS", false),
+		AutoAllocateVNI:         envBoolOrDefault("AUTO_ALLOCATE_VNI", true),
+		AllocatorLeaderElection: envBoolOrDefault("ALLOCATOR_LEADER_ELECTION", true),
+		AllocatorLeaseNamespace: os.Getenv("POD_NAMESPACE"),
+		AllocatorLeaseName:      envOrDefault("ALLOCATOR_LEASE_NAME", defaultLeaseName),
+		VNIStart:                envIntOrDefault("VNI_RANGE_START", defaultVNIStart),
+		VNIEnd:                  envIntOrDefault("VNI_RANGE_END", defaultVNIEnd),
 	}
 	if raw := os.Getenv("SYNC_PERIOD"); raw != "" {
 		parsed, err := time.ParseDuration(raw)
@@ -137,6 +156,9 @@ func loadAgentConfig() agentConfig {
 	}
 	if cfg.VNIEnd <= 0 || cfg.VNIEnd > 16777215 || cfg.VNIEnd < cfg.VNIStart {
 		log.Fatalf("VNI_RANGE_END must be between VNI_RANGE_START and 16777215, got %d", cfg.VNIEnd)
+	}
+	if cfg.AutoAllocateVNI && cfg.AllocatorLeaderElection && cfg.AllocatorLeaseNamespace == "" {
+		log.Fatalf("POD_NAMESPACE is required when AUTO_ALLOCATE_VNI=true and ALLOCATOR_LEADER_ELECTION=true")
 	}
 	return cfg
 }
@@ -173,6 +195,14 @@ func run(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Int
 
 	startInformers(ctx, nodeFactory, nadFactory)
 	go subscribeLinkEvents(ctx, cfg, triggerReconcile)
+	var allocatorLeader atomic.Bool
+	if cfg.AutoAllocateVNI {
+		if cfg.AllocatorLeaderElection {
+			startAllocatorLeaderElection(ctx, client, cfg, &allocatorLeader, triggerReconcile)
+		} else {
+			allocatorLeader.Store(true)
+		}
+	}
 
 	ticker := time.NewTicker(cfg.SyncPeriod)
 	defer ticker.Stop()
@@ -183,11 +213,11 @@ func run(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Int
 		case <-ctx.Done():
 			return ctx.Err()
 		case reason := <-trigger:
-			if err := reconcile(ctx, client, dynClient, nadInformer, cfg); err != nil {
+			if err := reconcile(ctx, client, dynClient, nadInformer, cfg, &allocatorLeader); err != nil {
 				log.Printf("reconcile failed reason=%q: %v", reason, err)
 			}
 		case <-ticker.C:
-			if err := reconcile(ctx, client, dynClient, nadInformer, cfg); err != nil {
+			if err := reconcile(ctx, client, dynClient, nadInformer, cfg, &allocatorLeader); err != nil {
 				log.Printf("reconcile failed reason=%q: %v", "periodic", err)
 			}
 		}
@@ -228,15 +258,22 @@ func subscribeLinkEvents(ctx context.Context, cfg agentConfig, trigger func(stri
 	}
 }
 
-func reconcile(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Interface, nadInformer cache.SharedIndexInformer, cfg agentConfig) error {
+func reconcile(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Interface, nadInformer cache.SharedIndexInformer, cfg agentConfig, allocatorLeader *atomic.Bool) error {
 	if cfg.DisableBridgeNetfilter {
 		if err := disableBridgeNetfilter(); err != nil {
 			return err
 		}
 	}
 	overlays := nadOverlays(nadInformer)
-	if cfg.AutoAllocateVNI {
-		if changed, err := allocateMissingVNIs(ctx, dynClient, overlays, cfg); err != nil {
+	localOverlays, err := discoverLocalOverlays(cfg)
+	if err != nil {
+		return err
+	}
+	if err := validateAssignedVNIs(overlays); err != nil {
+		return err
+	}
+	if cfg.AutoAllocateVNI && allocatorLeader.Load() {
+		if changed, err := allocateMissingVNIs(ctx, dynClient, overlays, localOverlays, cfg); err != nil {
 			return err
 		} else if changed {
 			return nil
@@ -252,6 +289,9 @@ func reconcile(ctx context.Context, client kubernetes.Interface, dynClient dynam
 			return err
 		}
 	}
+	if err := garbageCollectOverlays(overlays, cfg); err != nil {
+		return err
+	}
 	vxlans, err := discoverVXLANs(cfg.VXLANPrefix)
 	if err != nil {
 		return err
@@ -265,6 +305,56 @@ func reconcile(ctx context.Context, client kubernetes.Interface, dynClient dynam
 		}
 	}
 	return nil
+}
+
+func startAllocatorLeaderElection(ctx context.Context, client kubernetes.Interface, cfg agentConfig, leader *atomic.Bool, trigger func(string)) {
+	identity := cfg.NodeName
+	if identity == "" {
+		hostname, err := os.Hostname()
+		if err == nil && hostname != "" {
+			identity = hostname
+		} else {
+			identity = "unknown"
+		}
+	}
+
+	lock := &resourcelock.LeaseLock{
+		LeaseMeta: metav1.ObjectMeta{
+			Name:      cfg.AllocatorLeaseName,
+			Namespace: cfg.AllocatorLeaseNamespace,
+		},
+		Client: client.CoordinationV1(),
+		LockConfig: resourcelock.ResourceLockConfig{
+			Identity: identity,
+		},
+	}
+
+	go func() {
+		leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+			Lock:            lock,
+			LeaseDuration:   30 * time.Second,
+			RenewDeadline:   20 * time.Second,
+			RetryPeriod:     5 * time.Second,
+			ReleaseOnCancel: true,
+			Callbacks: leaderelection.LeaderCallbacks{
+				OnStartedLeading: func(leaderCtx context.Context) {
+					leader.Store(true)
+					log.Printf("became auto-vni allocator leader identity=%s lease=%s/%s", identity, cfg.AllocatorLeaseNamespace, cfg.AllocatorLeaseName)
+					trigger("allocator leader acquired")
+					<-leaderCtx.Done()
+					leader.Store(false)
+				},
+				OnStoppedLeading: func() {
+					leader.Store(false)
+					log.Printf("stopped auto-vni allocator leadership identity=%s lease=%s/%s", identity, cfg.AllocatorLeaseNamespace, cfg.AllocatorLeaseName)
+					trigger("allocator leader lost")
+				},
+				OnNewLeader: func(current string) {
+					log.Printf("auto-vni allocator leader=%s", current)
+				},
+			},
+		})
+	}()
 }
 
 func nadOverlays(informer cache.SharedIndexInformer) []nadOverlay {
@@ -296,6 +386,11 @@ func nadOverlays(informer cache.SharedIndexInformer) []nadOverlay {
 			RawConfig: rawConfig,
 		})
 	}
+	sort.Slice(overlays, func(i, j int) bool {
+		left := overlays[i].Namespace + "/" + overlays[i].Name
+		right := overlays[j].Namespace + "/" + overlays[j].Name
+		return left < right
+	})
 	return overlays
 }
 
@@ -317,6 +412,22 @@ func declaredOverlays(overlays []nadOverlay, cfg agentConfig) []overlayDecl {
 		decls = append(decls, decl)
 	}
 	return decls
+}
+
+func validateAssignedVNIs(overlays []nadOverlay) error {
+	used := map[int]string{}
+	for _, overlay := range overlays {
+		vni := overlay.Config.VNI
+		if vni <= 0 {
+			continue
+		}
+		owner := fmt.Sprintf("%s/%s", overlay.Namespace, overlay.Name)
+		if other, exists := used[vni]; exists && other != owner {
+			return fmt.Errorf("vni conflict: %s and %s both use vni %d", other, owner, vni)
+		}
+		used[vni] = owner
+	}
+	return nil
 }
 
 func parseNADConfig(raw string) (nadConfig, error) {
@@ -368,7 +479,7 @@ func overlayDeclFromConfig(nad nadConfig, cfg agentConfig) (overlayDecl, error) 
 	return decl, nil
 }
 
-func allocateMissingVNIs(ctx context.Context, dynClient dynamic.Interface, overlays []nadOverlay, cfg agentConfig) (bool, error) {
+func allocateMissingVNIs(ctx context.Context, dynClient dynamic.Interface, overlays []nadOverlay, localOverlays []localOverlay, cfg agentConfig) (bool, error) {
 	used := map[int]string{}
 	changed := false
 
@@ -382,6 +493,11 @@ func allocateMissingVNIs(ctx context.Context, dynClient dynamic.Interface, overl
 			return false, fmt.Errorf("vni conflict: %s and %s both use vni %d", other, owner, vni)
 		}
 		used[vni] = owner
+	}
+	for _, overlay := range localOverlays {
+		if _, exists := used[overlay.VNI]; !exists {
+			used[overlay.VNI] = "local-active/" + overlay.VXLANName
+		}
 	}
 
 	for _, overlay := range overlays {
@@ -403,6 +519,109 @@ func allocateMissingVNIs(ctx context.Context, dynClient dynamic.Interface, overl
 		log.Printf("allocated vni=%d nad=%s", vni, owner)
 	}
 	return changed, nil
+}
+
+func desiredOverlayVNIs(overlays []nadOverlay) map[int]struct{} {
+	desired := map[int]struct{}{}
+	for _, overlay := range overlays {
+		if overlay.Config.VNI > 0 {
+			desired[overlay.Config.VNI] = struct{}{}
+		}
+	}
+	return desired
+}
+
+func discoverLocalOverlays(cfg agentConfig) ([]localOverlay, error) {
+	vxlans, err := discoverVXLANs(cfg.VXLANPrefix)
+	if err != nil {
+		return nil, err
+	}
+	overlays := make([]localOverlay, 0, len(vxlans))
+	for _, vxlan := range vxlans {
+		suffix := strings.TrimPrefix(vxlan.Attrs().Name, cfg.VXLANPrefix)
+		vni, err := strconv.Atoi(suffix)
+		if err != nil || vni <= 0 || vni > 16777215 {
+			continue
+		}
+		bridgeName := cfg.BridgePrefix + suffix
+		bridge, err := netlink.LinkByName(bridgeName)
+		if err != nil {
+			bridge = nil
+		}
+		overlays = append(overlays, localOverlay{
+			VNI:        vni,
+			BridgeName: bridgeName,
+			VXLANName:  vxlan.Attrs().Name,
+			VXLAN:      vxlan,
+			Bridge:     bridge,
+		})
+	}
+	return overlays, nil
+}
+
+func garbageCollectOverlays(overlays []nadOverlay, cfg agentConfig) error {
+	desired := desiredOverlayVNIs(overlays)
+	localOverlays, err := discoverLocalOverlays(cfg)
+	if err != nil {
+		return err
+	}
+	for _, overlay := range localOverlays {
+		if _, ok := desired[overlay.VNI]; ok {
+			continue
+		}
+		if overlay.Bridge == nil {
+			continue
+		}
+		empty, err := bridgeHasNoPodPorts(overlay.Bridge, overlay.VXLANName)
+		if err != nil {
+			return err
+		}
+		if !empty {
+			continue
+		}
+		if overlay.VXLAN != nil {
+			if err := netlink.LinkDel(overlay.VXLAN); err != nil && !isNotFound(err) {
+				return fmt.Errorf("delete stale vxlan %s: %w", overlay.VXLANName, err)
+			}
+			log.Printf("deleted stale vxlan=%s vni=%d", overlay.VXLANName, overlay.VNI)
+		}
+		refetchedBridge, err := netlink.LinkByName(overlay.BridgeName)
+		if err != nil {
+			if isNotFound(err) {
+				continue
+			}
+			return fmt.Errorf("lookup stale bridge %s: %w", overlay.BridgeName, err)
+		}
+		empty, err = bridgeHasNoPodPorts(refetchedBridge, "")
+		if err != nil {
+			return err
+		}
+		if !empty {
+			continue
+		}
+		if err := netlink.LinkDel(refetchedBridge); err != nil && !isNotFound(err) {
+			return fmt.Errorf("delete stale bridge %s: %w", overlay.BridgeName, err)
+		}
+		log.Printf("deleted stale bridge=%s vni=%d", overlay.BridgeName, overlay.VNI)
+	}
+	return nil
+}
+
+func bridgeHasNoPodPorts(bridge netlink.Link, ignoreLinkName string) (bool, error) {
+	links, err := netlink.LinkList()
+	if err != nil {
+		return false, fmt.Errorf("list links for bridge %s cleanup: %w", bridge.Attrs().Name, err)
+	}
+	for _, link := range links {
+		if link.Attrs().MasterIndex != bridge.Attrs().Index {
+			continue
+		}
+		if ignoreLinkName != "" && link.Attrs().Name == ignoreLinkName {
+			continue
+		}
+		return false, nil
+	}
+	return true, nil
 }
 
 func nextFreeVNI(used map[int]string, cfg agentConfig) (int, error) {
