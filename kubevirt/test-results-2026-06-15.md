@@ -9,14 +9,19 @@
 - cw-multinet image: `ghcr.io/infinitydon/cw-multus-ipam-cni:fb58098`
 - Whereabouts release installed: `v0.9.4`
 
-KubeVirt required a placement adjustment because the default operator manifests initially targeted control-plane/master nodes, and this managed cluster exposes only worker nodes. The following patch was applied:
+KubeVirt required a placement adjustment because the default operator manifests initially targeted control-plane/master nodes, and this managed cluster exposes only worker nodes:
 
 ```sh
 kubectl -n kubevirt patch kubevirt kubevirt --type=merge \
   -p '{"spec":{"infra":{"nodePlacement":{}},"workloads":{"nodePlacement":{}}}}'
 ```
 
-The already-created install job was deleted after the patch so the operator recreated it with the corrected placement.
+If `virt-operator` remains pending before it can reconcile the KubeVirt CR, the operator Deployment affinity can also be removed:
+
+```sh
+kubectl -n kubevirt patch deployment virt-operator --type=json \
+  -p='[{"op":"remove","path":"/spec/template/spec/affinity"}]'
+```
 
 ## KubeVirt Components
 
@@ -29,98 +34,100 @@ virt-operator     2/2 Running
 
 ## VM Deployment
 
-Applied manifest shape:
+Applied manifest: `kubevirt/vm-cw-multinet-demo.yaml`
 
 - Namespace: `kubevirt-cw-test`
 - NAD: `vm-cw-net`
-- IPAM: `whereabouts`, range `10.254.50.0/24`, exclude `10.254.50.0/28`
-- Auto-VNI allocation: `vni=10000`
+- IPAM: `whereabouts`, range `10.254.57.0/24`, exclude `10.254.57.0/28`
+- Auto-VNI allocation: enabled by omitting `vni`
+- VM image: `quay.io/kubevirt/fedora-container-disk-images:35`
 - VM A: `cwm-vm-a`, node `g46cd14`
 - VM B: `cwm-vm-b`, node `g80b396`
 
-VM status:
+VMI status:
 
 ```text
-virtualmachine.kubevirt.io/cwm-vm-a   Running   Ready=True
-virtualmachine.kubevirt.io/cwm-vm-b   Running   Ready=True
+virtualmachineinstance.kubevirt.io/cwm-vm-a   Running   10.8.0.44    g46cd14   Ready=True
+virtualmachineinstance.kubevirt.io/cwm-vm-b   Running   10.8.0.155   g80b396   Ready=True
 ```
 
-VMI interfaces:
+Launcher pods:
 
 ```text
-cwm-vm-a  default  10.8.0.72    10.8.0.72      a6:d8:33:60:3c:c7
-cwm-vm-a  cwmnet   10.254.50.16 10.254.50.16   52:e6:02:38:1d:95
-cwm-vm-b  default  10.8.0.217   10.8.0.217     72:df:16:7d:9b:fd
-cwm-vm-b  cwmnet   10.254.50.17 10.254.50.17   7e:7e:70:55:d1:88
+virt-launcher-cwm-vm-a-mpt5g   3/3 Running   10.8.0.44    g46cd14
+virt-launcher-cwm-vm-b-kqq77   3/3 Running   10.8.0.155   g80b396
 ```
 
-Multus network-status on the launcher pods also showed the cw-multinet attachments:
+Kubernetes events showed Whereabouts assigning the cw-multinet secondary attachments:
 
 ```text
-virt-launcher-cwm-vm-a: kubevirt-cw-test/vm-cw-net, IP 10.254.50.16
-virt-launcher-cwm-vm-b: kubevirt-cw-test/vm-cw-net, IP 10.254.50.17
+Add pod274c9a51dce [10.254.57.16/24] from kubevirt-cw-test/vm-cw-net
+Add pod274c9a51dce [10.254.57.17/24] from kubevirt-cw-test/vm-cw-net
 ```
 
 ## Guest Validation
 
-CirrOS exposed the secondary NIC as `eth1`, but did not automatically apply the cloud-init `networkData` for that interface. The live test configured the guest interface manually from `virtctl console`:
+The Fedora cloud image applied cloud-init `networkData` and requested DHCP on the secondary KubeVirt bridge interface. Inside the guest, `eth1` received the Whereabouts-assigned address.
 
-```sh
-# cwm-vm-a
-sudo ifconfig eth1 10.254.50.16 netmask 255.255.255.0 up
-
-# cwm-vm-b
-sudo ifconfig eth1 10.254.50.17 netmask 255.255.255.0 up
-```
-
-VM B to VM A:
+VM A serial log:
 
 ```text
-PING 10.254.50.16 (10.254.50.16): 56 data bytes
-64 bytes from 10.254.50.16: seq=0 ttl=64 time=0.732 ms
-64 bytes from 10.254.50.16: seq=1 ttl=64 time=0.400 ms
-64 bytes from 10.254.50.16: seq=2 ttl=64 time=0.418 ms
-64 bytes from 10.254.50.16: seq=3 ttl=64 time=0.425 ms
-64 bytes from 10.254.50.16: seq=4 ttl=64 time=0.457 ms
+eth0: 10.0.2.2 fe80::ff:fe57:a
+eth1: 10.254.57.16 fe80::ff:fe57:1a
+CW-MULTINET-REPORT-START cwm-vm-a
+PING 10.254.57.17 (10.254.57.17) 56(84) bytes of data.
+64 bytes from 10.254.57.17: icmp_seq=1 ttl=64 time=0.903 ms
+64 bytes from 10.254.57.17: icmp_seq=2 ttl=64 time=0.509 ms
+64 bytes from 10.254.57.17: icmp_seq=3 ttl=64 time=0.479 ms
 
-5 packets transmitted, 5 packets received, 0% packet loss
-round-trip min/avg/max = 0.400/0.486/0.732 ms
+--- 10.254.57.17 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2003ms
+rtt min/avg/max/mdev = 0.479/0.630/0.903/0.193 ms
+CW-MULTINET-REPORT-END cwm-vm-a
 ```
 
-VM A to VM B:
+VM B serial log:
 
 ```text
-PING 10.254.50.17 (10.254.50.17): 56 data bytes
-64 bytes from 10.254.50.17: seq=0 ttl=64 time=0.455 ms
-64 bytes from 10.254.50.17: seq=1 ttl=64 time=0.385 ms
-64 bytes from 10.254.50.17: seq=2 ttl=64 time=1.630 ms
-64 bytes from 10.254.50.17: seq=3 ttl=64 time=0.417 ms
-64 bytes from 10.254.50.17: seq=4 ttl=64 time=0.468 ms
+eth0: 10.0.2.2 fe80::ff:fe57:b
+eth1: 10.254.57.17 fe80::ff:fe57:1b
+CW-MULTINET-REPORT-START cwm-vm-b
+PING 10.254.57.16 (10.254.57.16) 56(84) bytes of data.
+64 bytes from 10.254.57.16: icmp_seq=1 ttl=64 time=0.388 ms
+64 bytes from 10.254.57.16: icmp_seq=2 ttl=64 time=0.426 ms
+64 bytes from 10.254.57.16: icmp_seq=3 ttl=64 time=0.466 ms
 
-5 packets transmitted, 5 packets received, 0% packet loss
-round-trip min/avg/max = 0.385/0.671/1.630 ms
+--- 10.254.57.16 ping statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2003ms
+rtt min/avg/max/mdev = 0.388/0.426/0.466/0.031 ms
+CW-MULTINET-REPORT-END cwm-vm-b
 ```
 
-Result: pass. Two KubeVirt VMs on different worker nodes used cw-multinet as a secondary L2 network and successfully exchanged traffic over their secondary VM interfaces.
+Result: pass. Two KubeVirt VMs on different worker nodes used cw-multinet as a secondary L2 network, received their secondary guest IPs from Whereabouts through KubeVirt bridge binding, and successfully exchanged traffic over their secondary VM interfaces.
+
+## Notes
+
+- `quay.io/containerdisks/fedora:44` booted the VM domain, but KubeVirt `v1.8.3` rejected VMI status updates because the image produced an empty containerDisk checksum where the CRD expected an `int32`. The KubeVirt Fedora containerDisk image did not have this issue.
+- The earlier CirR0S smoke test proved that the secondary interface could be attached, but CirR0S did not apply the cloud-init YAML network data needed to configure `eth1` automatically.
+- The demo manifest includes a simple `fedora` password only for serial-console validation. Replace or remove it for any non-demo use.
 
 ## Cleanup
 
-The `kubevirt-cw-test` namespace was deleted after the test. Both node agents removed the stale host devices:
+The successful validation namespace was deleted after serial log collection:
 
-```text
-deleted stale vxlan=vx-cwm-10000 vni=10000
-deleted stale bridge=br-cwm-10000 vni=10000
+```sh
+kubectl delete namespace kubevirt-cw-test
 ```
 
-The Whereabouts pool remained as a CR, but all VM allocations were released:
+Whereabouts released the two VM allocations:
 
 ```yaml
 apiVersion: whereabouts.cni.cncf.io/v1alpha1
 kind: IPPool
 metadata:
-  name: 10.254.50.0-24
+  name: 10.254.57.0-24
   namespace: kube-system
 spec:
   allocations: {}
-  range: 10.254.50.0/24
+  range: 10.254.57.0/24
 ```

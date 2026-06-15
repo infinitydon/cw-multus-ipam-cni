@@ -11,15 +11,14 @@ metadata:
 spec:
   config: |
     {
-      "cniVersion": "0.4.0",
+      "cniVersion": "0.3.1",
       "name": "vm-cw-net",
       "type": "cw-multinet",
       "mtu": 1450,
-      "vxlanPort": 14789,
       "ipam": {
         "type": "whereabouts",
-        "range": "10.254.50.0/24",
-        "exclude": ["10.254.50.0/28"]
+        "range": "10.254.57.0/24",
+        "exclude": ["10.254.57.0/28"]
       }
     }
 ---
@@ -39,14 +38,15 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: g46cd14
-      terminationGracePeriodSeconds: 0
       domain:
-        cpu:
-          cores: 1
-        resources:
-          requests:
-            memory: 256Mi
         devices:
+          interfaces:
+            - name: default
+              masquerade: {}
+              macAddress: "02:00:00:57:00:0a"
+            - name: cwmnet
+              bridge: {}
+              macAddress: "02:00:00:57:00:1a"
           disks:
             - name: containerdisk
               disk:
@@ -54,38 +54,46 @@ spec:
             - name: cloudinitdisk
               disk:
                 bus: virtio
-          interfaces:
-            - name: default
-              masquerade: {}
-            - name: cwmnet
-              bridge: {}
-              model: virtio
+        resources:
+          requests:
+            memory: 2Gi
       networks:
         - name: default
           pod: {}
         - name: cwmnet
           multus:
-            networkName: kubevirt-cw-test/vm-cw-net
+            networkName: vm-cw-net
       volumes:
         - name: containerdisk
           containerDisk:
-            image: quay.io/kubevirt/cirros-container-disk-demo:latest
+            image: quay.io/kubevirt/fedora-container-disk-images:35
         - name: cloudinitdisk
           cloudInitNoCloud:
             userData: |
               #cloud-config
+              hostname: cwm-vm-a
+              user: fedora
+              password: fedora
+              chpasswd:
+                expire: false
+              ssh_pwauth: true
+              runcmd:
+                - [ sh, -c, "sleep 15; echo CW-MULTINET-REPORT-START cwm-vm-a > /dev/ttyS0; ip -br addr > /dev/ttyS0; ping -c 3 -W 2 10.254.57.17 > /dev/ttyS0 2>&1; echo CW-MULTINET-REPORT-END cwm-vm-a > /dev/ttyS0" ]
             networkData: |
-              network:
-                version: 1
-                config:
-                  - type: physical
-                    name: eth0
-                    subnets:
-                      - type: dhcp
-                  - type: physical
-                    name: eth1
-                    subnets:
-                      - type: dhcp
+              version: 2
+              ethernets:
+                nic0:
+                  match:
+                    macaddress: "02:00:00:57:00:0a"
+                  set-name: eth0
+                  dhcp4: true
+                  dhcp6: false
+                nic1:
+                  match:
+                    macaddress: "02:00:00:57:00:1a"
+                  set-name: eth1
+                  dhcp4: true
+                  dhcp6: false
 ---
 apiVersion: kubevirt.io/v1
 kind: VirtualMachine
@@ -103,14 +111,15 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: g80b396
-      terminationGracePeriodSeconds: 0
       domain:
-        cpu:
-          cores: 1
-        resources:
-          requests:
-            memory: 256Mi
         devices:
+          interfaces:
+            - name: default
+              masquerade: {}
+              macAddress: "02:00:00:57:00:0b"
+            - name: cwmnet
+              bridge: {}
+              macAddress: "02:00:00:57:00:1b"
           disks:
             - name: containerdisk
               disk:
@@ -118,35 +127,43 @@ spec:
             - name: cloudinitdisk
               disk:
                 bus: virtio
-          interfaces:
-            - name: default
-              masquerade: {}
-            - name: cwmnet
-              bridge: {}
-              model: virtio
+        resources:
+          requests:
+            memory: 2Gi
       networks:
         - name: default
           pod: {}
         - name: cwmnet
           multus:
-            networkName: kubevirt-cw-test/vm-cw-net
+            networkName: vm-cw-net
       volumes:
         - name: containerdisk
           containerDisk:
-            image: quay.io/kubevirt/cirros-container-disk-demo:latest
+            image: quay.io/kubevirt/fedora-container-disk-images:35
         - name: cloudinitdisk
           cloudInitNoCloud:
             userData: |
               #cloud-config
+              hostname: cwm-vm-b
+              user: fedora
+              password: fedora
+              chpasswd:
+                expire: false
+              ssh_pwauth: true
+              runcmd:
+                - [ sh, -c, "sleep 15; echo CW-MULTINET-REPORT-START cwm-vm-b > /dev/ttyS0; ip -br addr > /dev/ttyS0; ping -c 3 -W 2 10.254.57.16 > /dev/ttyS0 2>&1; echo CW-MULTINET-REPORT-END cwm-vm-b > /dev/ttyS0" ]
             networkData: |
-              network:
-                version: 1
-                config:
-                  - type: physical
-                    name: eth0
-                    subnets:
-                      - type: dhcp
-                  - type: physical
-                    name: eth1
-                    subnets:
-                      - type: dhcp
+              version: 2
+              ethernets:
+                nic0:
+                  match:
+                    macaddress: "02:00:00:57:00:0b"
+                  set-name: eth0
+                  dhcp4: true
+                  dhcp6: false
+                nic1:
+                  match:
+                    macaddress: "02:00:00:57:00:1b"
+                  set-name: eth1
+                  dhcp4: true
+                  dhcp6: false

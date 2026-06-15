@@ -1,13 +1,8 @@
-# KubeVirt With cw-multinet
+# KubeVirt With cw-multinet And Whereabouts
 
-This folder contains a minimal KubeVirt validation setup for running two VMs with a cw-multinet secondary interface.
+This folder contains a working KubeVirt validation setup for two VMs with a cw-multinet secondary interface and Whereabouts IPAM.
 
-References:
-
-- KubeVirt installation guide: https://kubevirt.io/user-guide/cluster_admin/installation/
-- KubeVirt release notes: https://kubevirt.io/user-guide/release_notes/
-- KubeVirt interfaces and networks: https://kubevirt.io/user-guide/network/interfaces_and_networks/
-- KubeVirt cloud-init startup scripts and networkData: https://kubevirt.io/user-guide/user_workloads/startup_scripts/
+The example uses a Fedora cloud containerDisk instead of CirrOS because the VM needs cloud-init `networkData` support to request DHCP on the secondary interface automatically. CirrOS is useful for a quick boot smoke test, but it did not apply the secondary NIC cloud-init network data in validation.
 
 ## Install KubeVirt
 
@@ -42,7 +37,7 @@ kubectl -n kubevirt wait kv kubevirt --for=condition=Available --timeout=600s
 kubectl -n kubevirt get pods -o wide
 ```
 
-For the 2026-06-15 validation cluster, `stable.txt` resolved to `v1.8.3`. That release line is aligned to Kubernetes `v1.35`; the test cluster was Kubernetes `v1.36.1`, so treat this as a forward-compatibility smoke test until KubeVirt publishes a release line aligned to Kubernetes `v1.36`.
+For the 2026-06-15 validation cluster, `stable.txt` resolved to `v1.8.3`.
 
 ## Create Two VMs On cw-multinet
 
@@ -52,79 +47,64 @@ The demo manifest creates:
 - NAD `vm-cw-net`
 - VM `cwm-vm-a` pinned to `g46cd14`
 - VM `cwm-vm-b` pinned to `g80b396`
+- A shared Whereabouts pool `10.254.57.0/24`
+- An automatically allocated cw-multinet VNI
 
 Update the two `nodeSelector` hostnames in `vm-cw-multinet-demo.yaml` if your worker node names differ.
+
+The manifest sets fixed guest MAC addresses and cloud-init `networkData` so Fedora requests DHCP on both `eth0` and `eth1`. With KubeVirt bridge binding, the DHCP server gives the guest the IP that Whereabouts assigned to the pod-side Multus attachment.
 
 Apply:
 
 ```sh
 kubectl apply -f kubevirt/vm-cw-multinet-demo.yaml
-kubectl -n kubevirt-cw-test wait vmi cwm-vm-a cwm-vm-b --for=condition=Ready --timeout=300s
+kubectl -n kubevirt-cw-test wait vmi cwm-vm-a cwm-vm-b --for=condition=Ready --timeout=600s
 kubectl -n kubevirt-cw-test get vm,vmi,pods -o wide
 ```
 
-Check the cw-multinet-assigned guest-facing IPs:
+Check the Multus/Whereabouts allocation events:
 
 ```sh
-kubectl -n kubevirt-cw-test get vmi cwm-vm-a cwm-vm-b -o json \
-  | jq -r '.items[] | .metadata.name as $n | .status.interfaces[]? |
-    [$n,.name,.ipAddress,((.ipAddresses//[])|join(",")),.mac] | @tsv'
+kubectl -n kubevirt-cw-test get events --sort-by=.lastTimestamp \
+  | grep 'AddedInterface'
 ```
 
-Expected shape:
+Expected shape on a fresh pool:
 
 ```text
-cwm-vm-a  default  10.8.x.x       10.8.x.x       <mac>
-cwm-vm-a  cwmnet   10.254.50.16   10.254.50.16   <mac>
-cwm-vm-b  default  10.8.x.x       10.8.x.x       <mac>
-cwm-vm-b  cwmnet   10.254.50.17   10.254.50.17   <mac>
+Add pod... [10.254.57.16/24] from kubevirt-cw-test/vm-cw-net
+Add pod... [10.254.57.17/24] from kubevirt-cw-test/vm-cw-net
 ```
 
-The KubeVirt bridge binding attaches the Multus/cw-multinet interface to the guest. The demo uses CirrOS because it boots quickly. In the live test, CirrOS exposed `eth1` but did not automatically apply the cloud-init `networkData` for that secondary interface, so the test configured the guest IP manually from the console.
+The manifest writes a boot-time validation report to each VM serial log. The report prints guest NIC addresses and pings the peer VM secondary IP. The baked-in ping targets assume the first two fresh-pool allocations are `.16` and `.17`; if the pool is reused, update the two `runcmd` ping targets to match the actual Whereabouts allocations.
 
-Download matching `virtctl`:
+Read the serial logs from the launcher pods:
 
 ```sh
-export RELEASE="$(curl -fsSL https://storage.googleapis.com/kubevirt-prow/release/kubevirt/kubevirt/stable.txt)"
-curl -fL -o /tmp/virtctl "https://github.com/kubevirt/kubevirt/releases/download/${RELEASE}/virtctl-${RELEASE}-linux-amd64"
-chmod +x /tmp/virtctl
+POD_A="$(kubectl -n kubevirt-cw-test get pod -l kubevirt.io/domain=cwm-vm-a -o jsonpath='{.items[0].metadata.name}')"
+kubectl -n kubevirt-cw-test exec "$POD_A" -c compute -- \
+  sh -c 'find /var/run/kubevirt-private -name virt-serial0-log -exec tail -220 {} \;'
+
+POD_B="$(kubectl -n kubevirt-cw-test get pod -l kubevirt.io/domain=cwm-vm-b -o jsonpath='{.items[0].metadata.name}')"
+kubectl -n kubevirt-cw-test exec "$POD_B" -c compute -- \
+  sh -c 'find /var/run/kubevirt-private -name virt-serial0-log -exec tail -220 {} \;'
 ```
 
-Console into each VM:
-
-```sh
-/tmp/virtctl -n kubevirt-cw-test console cwm-vm-a
-/tmp/virtctl -n kubevirt-cw-test console cwm-vm-b
-```
-
-CirrOS login:
+Expected guest evidence:
 
 ```text
-username: cirros
-password: gocubsgo
+eth1: 10.254.57.16 ...
+CW-MULTINET-REPORT-START cwm-vm-a
+3 packets transmitted, 3 received, 0% packet loss
+CW-MULTINET-REPORT-END cwm-vm-a
+
+eth1: 10.254.57.17 ...
+CW-MULTINET-REPORT-START cwm-vm-b
+3 packets transmitted, 3 received, 0% packet loss
+CW-MULTINET-REPORT-END cwm-vm-b
 ```
 
-Configure the secondary interface inside the guests using the IPs shown in VMI status:
-
-```sh
-# cwm-vm-a
-sudo ifconfig eth1 10.254.50.16 netmask 255.255.255.0 up
-
-# cwm-vm-b
-sudo ifconfig eth1 10.254.50.17 netmask 255.255.255.0 up
-```
-
-Test from VM A:
-
-```sh
-ping -c 5 -W 2 10.254.50.17
-```
-
-Test from VM B:
-
-```sh
-ping -c 5 -W 2 10.254.50.16
-```
+The demo password is `fedora` for the `fedora` user. It is intentionally simple for console validation and must not be reused in production manifests.
 
 ## Cleanup
 
@@ -140,4 +120,3 @@ Delete KubeVirt itself:
 kubectl delete kubevirt kubevirt -n kubevirt
 kubectl delete -f "https://github.com/kubevirt/kubevirt/releases/download/${RELEASE}/kubevirt-operator.yaml"
 ```
-
