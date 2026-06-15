@@ -225,3 +225,83 @@ rtt min/avg/max/mdev = 0.215/0.343/0.670/0.165 ms
 ```
 
 Result: passed. The new event-driven/NAD-aware agent removed the observed initial `Destination Host Unreachable` behavior for fresh VNIs in both pre-warmed and simultaneous apply flows.
+
+## Auto-VNI Allocation Retest
+
+The agent was then updated so users no longer need to manually select VNIs for every NAD. If a live `cw-multinet` NAD omits `vni`, the agent allocates the next free VNI from its configured range and patches only that field into `spec.config`, preserving the rest of the CNI configuration.
+
+Deployed image:
+
+```text
+installer=ghcr.io/infinitydon/cw-multus-ipam-cni:38b7eed
+agent=ghcr.io/infinitydon/cw-multus-ipam-cni:38b7eed
+```
+
+Agent defaults:
+
+```text
+PREWARM_NADS=false
+AUTO_ALLOCATE_VNI=true
+VNI_RANGE_START=10000
+VNI_RANGE_END=16777215
+```
+
+Input NAD intentionally omitted `vni`:
+
+```json
+{
+  "cniVersion": "0.4.0",
+  "name": "auto-net",
+  "type": "cw-multinet",
+  "capabilities": { "ips": true },
+  "mtu": 1450,
+  "vxlanPort": 14789,
+  "ipam": {
+    "type": "static",
+    "addresses": []
+  }
+}
+```
+
+The agent patched the NAD to add `vni: 10000` while preserving the original config:
+
+```json
+{
+  "capabilities": {
+    "ips": true
+  },
+  "cniVersion": "0.4.0",
+  "ipam": {
+    "addresses": [],
+    "type": "static"
+  },
+  "mtu": 1450,
+  "name": "auto-net",
+  "type": "cw-multinet",
+  "vni": 10000,
+  "vxlanPort": 14789
+}
+```
+
+Cross-node pods then attached successfully:
+
+- Server node: `g46cd14`
+- Client node: `g80b396`
+- Server secondary IP: `10.253.0.10/24`
+- Client secondary IP: `10.253.0.20/24`
+
+First ping after pod readiness succeeded:
+
+```text
+5 packets transmitted, 5 received, 0% packet loss
+rtt min/avg/max/mdev = 0.220/0.326/0.675/0.174 ms
+```
+
+TCP single-stream throughput:
+
+```text
+[  5]   0.00-10.00  sec  26.0 GBytes  22.4 Gbits/sec  136            sender
+[  5]   0.00-10.00  sec  26.0 GBytes  22.3 Gbits/sec                  receiver
+```
+
+Result: passed. A NAD without a manually supplied VNI was assigned a stable VNI, preserved the original CNI configuration, attached pods successfully, and delivered normal cross-node cw-multinet throughput.
