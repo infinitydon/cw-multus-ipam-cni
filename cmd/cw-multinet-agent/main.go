@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -14,8 +15,14 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/vishvananda/netlink"
@@ -38,17 +45,56 @@ type agentConfig struct {
 	DisableBridgeNetfilter bool
 }
 
+type overlayDecl struct {
+	VNI             int
+	MTU             int
+	VXLANPort       int
+	BridgeName      string
+	VXLANName       string
+	UnderlayIface   string
+	SourceAddress   string
+	DisableLearning bool
+}
+
+type nadConfig struct {
+	Type            string `json:"type,omitempty"`
+	VNI             int    `json:"vni,omitempty"`
+	MTU             int    `json:"mtu,omitempty"`
+	VXLANPort       int    `json:"vxlanPort,omitempty"`
+	BridgeName      string `json:"bridgeName,omitempty"`
+	VXLANName       string `json:"vxlanName,omitempty"`
+	UnderlayIface   string `json:"underlayInterface,omitempty"`
+	SourceAddress   string `json:"sourceAddress,omitempty"`
+	DisableLearning bool   `json:"disableLearning,omitempty"`
+}
+
+var nadGVR = schema.GroupVersionResource{
+	Group:    "k8s.cni.cncf.io",
+	Version:  "v1",
+	Resource: "network-attachment-definitions",
+}
+
+var errNotCWMultinet = errors.New("not a cw-multinet NAD")
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
 	cfg := loadAgentConfig()
-	client, err := newKubeClient()
+	restCfg, err := kubeRESTConfig()
 	if err != nil {
-		log.Fatalf("create kubernetes client: %v", err)
+		log.Fatalf("create kubernetes rest config: %v", err)
+	}
+	client, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		log.Fatalf("create kubernetes clientset: %v", err)
+	}
+	dynClient, err := dynamic.NewForConfig(restCfg)
+	if err != nil {
+		log.Fatalf("create dynamic client: %v", err)
 	}
 
 	log.Printf("starting cw-multinet-agent vxlanPrefix=%s bridgePrefix=%s syncPeriod=%s nodeName=%s disableBridgeNetfilter=%t", cfg.VXLANPrefix, cfg.BridgePrefix, cfg.SyncPeriod, cfg.NodeName, cfg.DisableBridgeNetfilter)
-	if err := run(context.Background(), client, cfg); err != nil {
+	if err := run(context.Background(), client, dynClient, cfg); err != nil {
 		log.Fatalf("agent stopped: %v", err)
 	}
 }
@@ -71,23 +117,94 @@ func loadAgentConfig() agentConfig {
 	return cfg
 }
 
-func run(ctx context.Context, client kubernetes.Interface, cfg agentConfig) error {
+func run(ctx context.Context, client kubernetes.Interface, dynClient dynamic.Interface, cfg agentConfig) error {
+	trigger := make(chan string, 1)
+	triggerReconcile := func(reason string) {
+		select {
+		case trigger <- reason:
+		default:
+		}
+	}
+
+	var nadInformer cache.SharedIndexInformer
+	nodeFactory := informers.NewSharedInformerFactory(client, 0)
+	nodeInformer := nodeFactory.Core().V1().Nodes().Informer()
+	if _, err := nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(any) { triggerReconcile("node add") },
+		UpdateFunc: func(any, any) { triggerReconcile("node update") },
+		DeleteFunc: func(any) { triggerReconcile("node delete") },
+	}); err != nil {
+		return fmt.Errorf("register node informer handler: %w", err)
+	}
+
+	nadFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dynClient, 0, metav1.NamespaceAll, nil)
+	nadInformer = nadFactory.ForResource(nadGVR).Informer()
+	if _, err := nadInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(any) { triggerReconcile("nad add") },
+		UpdateFunc: func(any, any) { triggerReconcile("nad update") },
+		DeleteFunc: func(any) { triggerReconcile("nad delete") },
+	}); err != nil {
+		return fmt.Errorf("register nad informer handler: %w", err)
+	}
+
+	startInformers(ctx, nodeFactory, nadFactory)
+	go subscribeLinkEvents(ctx, cfg, triggerReconcile)
+
 	ticker := time.NewTicker(cfg.SyncPeriod)
 	defer ticker.Stop()
+	triggerReconcile("startup")
 
 	for {
-		if err := reconcile(ctx, client, cfg); err != nil {
-			log.Printf("reconcile failed: %v", err)
-		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case reason := <-trigger:
+			if err := reconcile(ctx, client, nadInformer, cfg); err != nil {
+				log.Printf("reconcile failed reason=%q: %v", reason, err)
+			}
 		case <-ticker.C:
+			if err := reconcile(ctx, client, nadInformer, cfg); err != nil {
+				log.Printf("reconcile failed reason=%q: %v", "periodic", err)
+			}
 		}
 	}
 }
 
-func reconcile(ctx context.Context, client kubernetes.Interface, cfg agentConfig) error {
+func startInformers(ctx context.Context, nodeFactory informers.SharedInformerFactory, nadFactory dynamicinformer.DynamicSharedInformerFactory) {
+	nodeFactory.Start(ctx.Done())
+	nadFactory.Start(ctx.Done())
+	cache.WaitForCacheSync(ctx.Done(), nodeFactory.Core().V1().Nodes().Informer().HasSynced)
+	for gvr, ok := range nadFactory.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			log.Printf("informer cache sync failed gvr=%s", gvr.String())
+		}
+	}
+}
+
+func subscribeLinkEvents(ctx context.Context, cfg agentConfig, trigger func(string)) {
+	updates := make(chan netlink.LinkUpdate, 32)
+	done := make(chan struct{})
+	defer close(done)
+	if err := netlink.LinkSubscribe(updates, done); err != nil {
+		log.Printf("netlink link subscribe failed: %v", err)
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case update := <-updates:
+			if update.Link == nil || update.Link.Type() != "vxlan" {
+				continue
+			}
+			if strings.HasPrefix(update.Link.Attrs().Name, cfg.VXLANPrefix) {
+				trigger("netlink vxlan " + update.Link.Attrs().Name)
+			}
+		}
+	}
+}
+
+func reconcile(ctx context.Context, client kubernetes.Interface, nadInformer cache.SharedIndexInformer, cfg agentConfig) error {
 	if cfg.DisableBridgeNetfilter {
 		if err := disableBridgeNetfilter(); err != nil {
 			return err
@@ -95,6 +212,10 @@ func reconcile(ctx context.Context, client kubernetes.Interface, cfg agentConfig
 	}
 	desiredPeers, err := desiredNodeIPs(ctx, client, cfg.NodeName)
 	if err != nil {
+		return err
+	}
+	decls := declaredOverlays(nadInformer, cfg)
+	if err := ensureDeclaredOverlays(decls); err != nil {
 		return err
 	}
 	vxlans, err := discoverVXLANs(cfg.VXLANPrefix)
@@ -107,6 +228,192 @@ func reconcile(ctx context.Context, client kubernetes.Interface, cfg agentConfig
 		}
 		if err := reconcileFDB(vxlan, desiredPeers); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func declaredOverlays(informer cache.SharedIndexInformer, cfg agentConfig) []overlayDecl {
+	if informer == nil {
+		return nil
+	}
+	seen := map[string]overlayDecl{}
+	for _, item := range informer.GetStore().List() {
+		obj, ok := item.(*unstructured.Unstructured)
+		if !ok {
+			continue
+		}
+		rawConfig, ok, err := unstructured.NestedString(obj.Object, "spec", "config")
+		if err != nil || !ok || strings.TrimSpace(rawConfig) == "" {
+			continue
+		}
+		decl, err := parseNADOverlay(rawConfig, cfg)
+		if err != nil {
+			if errors.Is(err, errNotCWMultinet) {
+				continue
+			}
+			log.Printf("skip nad=%s/%s: %v", obj.GetNamespace(), obj.GetName(), err)
+			continue
+		}
+		seen[decl.VXLANName] = decl
+	}
+	decls := make([]overlayDecl, 0, len(seen))
+	for _, decl := range seen {
+		decls = append(decls, decl)
+	}
+	return decls
+}
+
+func parseNADOverlay(raw string, cfg agentConfig) (overlayDecl, error) {
+	nad := nadConfig{}
+	if err := json.Unmarshal([]byte(raw), &nad); err != nil {
+		return overlayDecl{}, fmt.Errorf("parse config: %w", err)
+	}
+	if nad.Type != "cw-multinet" {
+		return overlayDecl{}, errNotCWMultinet
+	}
+	if nad.VNI <= 0 || nad.VNI > 16777215 {
+		return overlayDecl{}, fmt.Errorf("vni is required and must be between 1 and 16777215")
+	}
+	decl := overlayDecl{
+		VNI:             nad.VNI,
+		MTU:             nad.MTU,
+		VXLANPort:       nad.VXLANPort,
+		BridgeName:      nad.BridgeName,
+		VXLANName:       nad.VXLANName,
+		UnderlayIface:   nad.UnderlayIface,
+		SourceAddress:   nad.SourceAddress,
+		DisableLearning: nad.DisableLearning,
+	}
+	if decl.MTU == 0 {
+		decl.MTU = 1450
+	}
+	if decl.VXLANPort == 0 {
+		decl.VXLANPort = 14789
+	}
+	if decl.BridgeName == "" {
+		decl.BridgeName = fmt.Sprintf("%s%d", cfg.BridgePrefix, decl.VNI)
+	}
+	if decl.VXLANName == "" {
+		decl.VXLANName = fmt.Sprintf("%s%d", cfg.VXLANPrefix, decl.VNI)
+	}
+	if len(decl.BridgeName) > 15 {
+		return overlayDecl{}, fmt.Errorf("bridgeName %q exceeds Linux 15 character interface limit", decl.BridgeName)
+	}
+	if len(decl.VXLANName) > 15 {
+		return overlayDecl{}, fmt.Errorf("vxlanName %q exceeds Linux 15 character interface limit", decl.VXLANName)
+	}
+	return decl, nil
+}
+
+func ensureDeclaredOverlays(decls []overlayDecl) error {
+	for _, decl := range decls {
+		bridge, err := ensureBridge(decl.BridgeName, decl.MTU)
+		if err != nil {
+			return err
+		}
+		if _, err := ensureVxlan(decl, bridge); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureBridge(name string, mtu int) (netlink.Link, error) {
+	link, err := netlink.LinkByName(name)
+	if err == nil {
+		if link.Type() != "bridge" {
+			return nil, fmt.Errorf("link %s already exists with type %s, expected bridge", name, link.Type())
+		}
+		if err := setMTU(link, mtu); err != nil {
+			return nil, err
+		}
+		if err := netlink.LinkSetUp(link); err != nil {
+			return nil, fmt.Errorf("set bridge %s up: %w", name, err)
+		}
+		return link, nil
+	}
+
+	bridge := &netlink.Bridge{LinkAttrs: netlink.LinkAttrs{Name: name, MTU: mtu}}
+	if err := netlink.LinkAdd(bridge); err != nil {
+		return nil, fmt.Errorf("add bridge %s: %w", name, err)
+	}
+	link, err = netlink.LinkByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("lookup created bridge %s: %w", name, err)
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		return nil, fmt.Errorf("set bridge %s up: %w", name, err)
+	}
+	log.Printf("created bridge=%s", name)
+	return link, nil
+}
+
+func ensureVxlan(decl overlayDecl, bridge netlink.Link) (netlink.Link, error) {
+	link, err := netlink.LinkByName(decl.VXLANName)
+	if err == nil {
+		if link.Type() != "vxlan" {
+			return nil, fmt.Errorf("link %s already exists with type %s, expected vxlan", decl.VXLANName, link.Type())
+		}
+		if err := enslaveAndRaise(link, bridge, decl.MTU); err != nil {
+			return nil, err
+		}
+		return link, nil
+	}
+
+	vxlan := &netlink.Vxlan{
+		LinkAttrs: netlink.LinkAttrs{Name: decl.VXLANName, MTU: decl.MTU},
+		VxlanId:   decl.VNI,
+		Port:      decl.VXLANPort,
+		Learning:  !decl.DisableLearning,
+	}
+	if decl.UnderlayIface != "" {
+		underlay, err := netlink.LinkByName(decl.UnderlayIface)
+		if err != nil {
+			return nil, fmt.Errorf("lookup underlayInterface %s: %w", decl.UnderlayIface, err)
+		}
+		vxlan.VtepDevIndex = underlay.Attrs().Index
+	}
+	if decl.SourceAddress != "" {
+		src := net.ParseIP(decl.SourceAddress)
+		if src == nil {
+			return nil, fmt.Errorf("parse sourceAddress %q", decl.SourceAddress)
+		}
+		vxlan.SrcAddr = src
+	}
+	if err := netlink.LinkAdd(vxlan); err != nil {
+		return nil, fmt.Errorf("add vxlan %s vni %d: %w", decl.VXLANName, decl.VNI, err)
+	}
+	link, err = netlink.LinkByName(decl.VXLANName)
+	if err != nil {
+		return nil, fmt.Errorf("lookup created vxlan %s: %w", decl.VXLANName, err)
+	}
+	if err := enslaveAndRaise(link, bridge, decl.MTU); err != nil {
+		return nil, err
+	}
+	log.Printf("created vxlan=%s vni=%d bridge=%s", decl.VXLANName, decl.VNI, bridge.Attrs().Name)
+	return link, nil
+}
+
+func enslaveAndRaise(link, bridge netlink.Link, mtu int) error {
+	if err := setMTU(link, mtu); err != nil {
+		return err
+	}
+	if link.Attrs().MasterIndex != bridge.Attrs().Index {
+		if err := netlink.LinkSetMaster(link, bridge); err != nil {
+			return fmt.Errorf("attach %s to bridge %s: %w", link.Attrs().Name, bridge.Attrs().Name, err)
+		}
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		return fmt.Errorf("set %s up: %w", link.Attrs().Name, err)
+	}
+	return nil
+}
+
+func setMTU(link netlink.Link, mtu int) error {
+	if mtu > 0 && link.Attrs().MTU != mtu {
+		if err := netlink.LinkSetMTU(link, mtu); err != nil {
+			return fmt.Errorf("set %s mtu %d: %w", link.Attrs().Name, mtu, err)
 		}
 	}
 	return nil
@@ -287,7 +594,7 @@ func localInterfaceIPs() []net.IP {
 	return ips
 }
 
-func newKubeClient() (kubernetes.Interface, error) {
+func kubeRESTConfig() (*rest.Config, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		kubeconfig := os.Getenv("KUBECONFIG")
@@ -305,7 +612,7 @@ func newKubeClient() (kubernetes.Interface, error) {
 			return nil, err
 		}
 	}
-	return kubernetes.NewForConfig(cfg)
+	return cfg, nil
 }
 
 func envOrDefault(key, fallback string) string {
