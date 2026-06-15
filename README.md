@@ -92,7 +92,7 @@ metadata:
 | `peers` | `[]` | Optional static remote node VTEP IPs programmed by the CNI call. The node agent handles dynamic peers. |
 | `bridgeName` | `br-cwm-<vni>` | Host bridge name. Must fit Linux's 15-character interface limit. |
 | `vxlanName` | `vx-cwm-<vni>` | Host VXLAN device name. Must fit Linux's 15-character interface limit. |
-| `vxlanPort` | `4789` | UDP destination port for VXLAN. |
+| `vxlanPort` | `14789` | UDP destination port for VXLAN. CoreWeave filtered UDP/4789 in testing, so the default avoids the well-known VXLAN port. |
 | `mtu` | `1450` | MTU for bridge, VXLAN, and pod veth. Adjust for the provider underlay. |
 | `underlayInterface` | kernel route | Optional host interface to bind the VXLAN VTEP to. |
 | `sourceAddress` | kernel route | Optional local VTEP source IP. |

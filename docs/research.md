@@ -33,4 +33,4 @@ Whereabouts is the recommended dynamic allocator when addresses must be unique a
 
 The plugin creates an L2 overlay. A companion `cw-multinet-agent` DaemonSet watches Kubernetes Nodes, extracts Ready node InternalIPs, and reconciles VXLAN flood FDB entries on every host so joins, removals, and readiness changes are reflected without editing NADs.
 
-All nodes must be able to send UDP VXLAN traffic to each peer on `vxlanPort`, default `4789`.
+All nodes must be able to send UDP VXLAN traffic to each peer on `vxlanPort`, default `14789`. Testing on the sample CoreWeave cluster showed node-to-node ICMP worked, arbitrary UDP such as `4790` arrived, but UDP/4789 did not arrive at the remote node.

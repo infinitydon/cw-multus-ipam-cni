@@ -25,7 +25,7 @@ const (
 	pluginName         = "cw-multinet"
 	defaultMTU         = 1450
 	defaultRouteMetric = 200
-	defaultVxlanPort   = 4789
+	defaultVxlanPort   = 14789
 	defaultVethPrefix  = "cwm"
 )
 
