@@ -303,3 +303,197 @@ TCP single-stream throughput:
 ```
 
 Result: passed. A NAD without a manually supplied VNI was assigned a stable VNI, preserved the original CNI configuration, attached pods successfully, and delivered normal cross-node cw-multinet throughput.
+
+## New-Node Lifecycle and Expanded Throughput Retest
+
+Date: 2026-06-16
+
+The cluster had a newly added worker node:
+
+| Node | Internal IP | Age at test | Status |
+| --- | --- | ---: | --- |
+| `g46cd14` | `10.176.244.201` | `67d` | `Ready` |
+| `g80b396` | `10.176.243.1` | `28d` | `Ready` |
+| `g55e620` | `10.176.245.11` | `9h` | `Ready` |
+
+`cw-multinet-cni` and Whereabouts were already running on all three nodes. The new node had:
+
+```text
+cw-multinet-system/cw-multinet-cni-97ld8   2/2 Running   node=g55e620
+kube-system/whereabouts-ddrrh              1/1 Running   node=g55e620
+```
+
+The new node agent log showed that it joined normally:
+
+```text
+starting cw-multinet-agent ... nodeName=g55e620 ...
+set /proc/sys/net/bridge/bridge-nf-call-iptables=0
+set /proc/sys/net/bridge/bridge-nf-call-ip6tables=0
+auto-vni allocator leader=g46cd14
+```
+
+### Lifecycle Proof
+
+A temporary namespace `cw-multinet-node-lifecycle-test` was created with VNI `7601`, one pod pinned to the new node and one pod pinned to an older node:
+
+| Pod | Node | Secondary IP |
+| --- | --- | --- |
+| `lifecycle-new-node` | `g55e620` | `10.252.60.20/24` |
+| `lifecycle-old-node` | `g80b396` | `10.252.60.10/24` |
+
+Both pods attached to the secondary interface:
+
+```text
+lifecycle-new-node:
+test0  10.252.60.20/24
+
+lifecycle-old-node:
+test0  10.252.60.10/24
+```
+
+The agents reconciled the new VNI and included the newly added node in FDB peer programming:
+
+```text
+g55e620:
+attached vxlan=vx-cwm-7601 bridge=br-cwm-7601
+added fdb peer=10.176.244.201 link=vx-cwm-7601
+added fdb peer=10.176.243.1 link=vx-cwm-7601
+
+g80b396:
+attached vxlan=vx-cwm-7601 bridge=br-cwm-7601
+added fdb peer=10.176.245.11 link=vx-cwm-7601
+```
+
+Dataplane validation from the new node to the older node passed:
+
+| Test | Direction | Result |
+| --- | --- | --- |
+| ICMP | `10.252.60.20 -> 10.252.60.10` | `5/5` received, `0%` loss, `0.320 ms` average RTT |
+| iperf3 TCP single stream | `10.252.60.20 -> 10.252.60.10` | `15.4 GBytes`, `13.2 Gbits/sec` receiver |
+| iperf3 TCP 4 parallel streams | `10.252.60.20 -> 10.252.60.10` | `57.7 GBytes`, `49.5 Gbits/sec` receiver |
+
+Result: passed. The plugin handled the new worker node without code or chart changes.
+
+### Three-Node iperf3 Matrix
+
+A second temporary namespace `cw-multinet-node-matrix-test` was created with VNI `7602` and one pod pinned to each worker:
+
+| Pod | Node | Secondary IP |
+| --- | --- | --- |
+| `matrix-g46cd14` | `g46cd14` | `10.252.61.10/24` |
+| `matrix-g80b396` | `g80b396` | `10.252.61.20/24` |
+| `matrix-g55e620` | `g55e620` | `10.252.61.30/24` |
+
+Each direction was tested with `iperf3 -P 4 -t 10`:
+
+| Direction | Receiver throughput |
+| --- | ---: |
+| `g46cd14 -> g80b396` | `35.2 Gbits/sec` |
+| `g80b396 -> g46cd14` | `68.0 Gbits/sec` |
+| `g55e620 -> g80b396` | `51.3 Gbits/sec` |
+| `g80b396 -> g55e620` | `71.0 Gbits/sec` |
+| `g55e620 -> g46cd14` | `59.5 Gbits/sec` |
+| `g46cd14 -> g55e620` | `78.3 Gbits/sec` |
+
+The matrix showed strong directional variance. The newly added node was not generally slower: traffic into `g55e620` reached `71.0-78.3 Gbits/sec`, while traffic out of it reached `51.3-59.5 Gbits/sec` in this run. The old node pair also showed directional variance, with `g46cd14 -> g80b396` at `35.2 Gbits/sec` and `g80b396 -> g46cd14` at `68.0 Gbits/sec`.
+
+### Expanded iperf3 Mode Test
+
+A third temporary namespace `cw-multinet-throughput-methods` was created with VNI `7603` and one pod per node:
+
+| Pod | Node | Secondary IP |
+| --- | --- | --- |
+| `methods-g46cd14` | `g46cd14` | `10.252.62.10/24` |
+| `methods-g80b396` | `g80b396` | `10.252.62.20/24` |
+| `methods-g55e620` | `g55e620` | `10.252.62.30/24` |
+
+The test compared `iperf3` TCP parallelism, reverse mode, bidirectional mode, and UDP target mode.
+
+TCP results:
+
+| Pair / Direction | TCP `-P4` | TCP `-P8` | Bidirectional `-P4` |
+| --- | ---: | ---: | ---: |
+| `g46cd14 -> g80b396` | `50.9 Gbits/sec` | `79.5 Gbits/sec` | `42.5 Gbits/sec` |
+| `g80b396 -> g46cd14` | `64.6 Gbits/sec` | not run separately | `65.0 Gbits/sec` |
+| `g55e620 -> g80b396` | `50.4 Gbits/sec` | `96.2 Gbits/sec` | `42.2 Gbits/sec` |
+| `g80b396 -> g55e620` | `61.4 Gbits/sec` | not run separately | `64.6 Gbits/sec` |
+| `g46cd14 -> g55e620` | `71.9 Gbits/sec` | `109 Gbits/sec` | `55.5 Gbits/sec` |
+| `g55e620 -> g46cd14` | `64.2 Gbits/sec` | not run separately | `54.8 Gbits/sec` |
+
+UDP target `50G` results:
+
+| Direction | Result |
+| --- | ---: |
+| `g46cd14 -> g80b396` | `2.19 Gbits/sec`, `6.5%` loss |
+| `g80b396 -> g46cd14` | `1.31 Gbits/sec`, `0%` loss |
+| `g55e620 -> g80b396` | `2.59 Gbits/sec`, `6%` loss |
+| `g80b396 -> g55e620` | `1.30 Gbits/sec`, `0%` loss |
+| `g46cd14 -> g55e620` | `2.55 Gbits/sec`, `0%` loss |
+| `g55e620 -> g46cd14` | `2.41 Gbits/sec`, `0%` loss |
+
+Key observations:
+
+- `iperf3 -P4` can understate the available overlay ceiling on some paths.
+- `iperf3 -P8` produced the highest observed results:
+  - `g46cd14 -> g55e620`: `109 Gbits/sec`
+  - `g55e620 -> g80b396`: `96.2 Gbits/sec`
+  - `g46cd14 -> g80b396`: `79.5 Gbits/sec`
+- Bidirectional TCP showed roughly `100-110 Gbits/sec` aggregate throughput on the tested pairs.
+- UDP mode was much lower than TCP and appears generator/receiver limited in these containers, so it should not be used as the overlay ceiling measurement here.
+
+### nuttcp Comparison
+
+An additional temporary namespace `cw-multinet-alt-throughput` was created with VNI `7604` and the same three-node layout:
+
+| Pod | Node | Secondary IP |
+| --- | --- | --- |
+| `alt-g46cd14` | `g46cd14` | `10.252.63.10/24` |
+| `alt-g80b396` | `g80b396` | `10.252.63.20/24` |
+| `alt-g55e620` | `g55e620` | `10.252.63.30/24` |
+
+`ghcr.io/nicolaka/netshoot:latest` is Alpine-based. It did not include `nuttcp`, `netperf`, `ntttcp`, or `sockperf` by default. Alpine package repositories provided `nuttcp`, so it was installed at runtime:
+
+```sh
+apk add --no-cache nuttcp
+```
+
+Installed version:
+
+```text
+nuttcp-8.2.2
+```
+
+Alpine did not provide `netperf`, `ntttcp`, or `sockperf` in the configured repositories.
+
+`nuttcp` TCP results:
+
+| Direction | `nuttcp -N4 -T10` | `nuttcp -N8 -T10` |
+| --- | ---: | ---: |
+| `g46cd14 -> g80b396` | `13.5 Gbits/sec` | `14.3 Gbits/sec` |
+| `g80b396 -> g46cd14` | `15.7 Gbits/sec` | not run |
+| `g55e620 -> g80b396` | `13.9 Gbits/sec` | `13.8 Gbits/sec` |
+| `g80b396 -> g55e620` | `15.8 Gbits/sec` | not run |
+| `g46cd14 -> g55e620` | `18.6 Gbits/sec` | `17.9 Gbits/sec` |
+| `g55e620 -> g46cd14` | `19.7 Gbits/sec` | not run |
+
+`nuttcp` UDP target `50G` results:
+
+| Direction | Result |
+| --- | ---: |
+| `g46cd14 -> g80b396` | `1.58 Gbits/sec`, `0%` loss |
+| `g80b396 -> g46cd14` | `0.87 Gbits/sec`, `0%` loss |
+| `g55e620 -> g80b396` | `1.35 Gbits/sec`, `5.78%` loss |
+| `g80b396 -> g55e620` | `0.85 Gbits/sec`, `0%` loss |
+| `g46cd14 -> g55e620` | `1.56 Gbits/sec`, `0%` loss |
+| `g55e620 -> g46cd14` | `1.82 Gbits/sec`, `0%` loss |
+
+Conclusion: `nuttcp` was useful as an independent sanity check but could not drive this overlay path as hard as `iperf3` in the same pod environment. For this cluster and container image, `iperf3` with adequate parallelism is the better throughput ceiling tool.
+
+All temporary namespaces from the June 16 retests were deleted after capturing results:
+
+```text
+cw-multinet-node-lifecycle-test
+cw-multinet-node-matrix-test
+cw-multinet-throughput-methods
+cw-multinet-alt-throughput
+```
