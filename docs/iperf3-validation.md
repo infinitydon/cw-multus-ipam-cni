@@ -157,4 +157,52 @@ KUBECONFIG=/path/to/kubeconfig DURATION=5 ./scripts/run-packetrusher-iperf3.sh
 [  6]   0.00-5.01   sec   713 MBytes  1.19 Gbits/sec                  receiver
 ```
 
+## AMBR Retest
+
+The original subscriber data provisioned UE AMBR as:
+
+```json
+"subscribedUeAmbr": {
+  "downlink": "2 Gbps",
+  "uplink": "1 Gbps"
+}
+```
+
+The chart now exposes this as:
+
+```yaml
+subprov:
+  subscribedUeAmbr:
+    downlink: "20 Gbps"
+    uplink: "20 Gbps"
+```
+
+The live subscriber records in MongoDB were updated and verified:
+
+```json
+{
+  "ueId": "imsi-208930000000003",
+  "subscribedUeAmbr": {
+    "downlink": "20 Gbps",
+    "uplink": "20 Gbps"
+  }
+}
+```
+
+After reprovisioning, AMF, SMF, UPF, UDM, UDR, and PCF were restarted, and PacketRusher established a fresh PDU session.
+
+Retest results:
+
+```text
+ip vrf exec vrf0000000003 iperf3 -c 10.200.6.10 -p 5201 -P 4 -t 10
+[SUM]   0.00-10.03  sec  1.27 GBytes  1.09 Gbits/sec  120             sender
+[SUM]   0.00-10.03  sec  1.27 GBytes  1.09 Gbits/sec                  receiver
+
+ip vrf exec vrf0000000003 iperf3 -c 10.200.6.10 -p 5201 -P 8 -t 10
+[SUM]   0.00-10.00  sec  1.33 GBytes  1.14 Gbits/sec  133             sender
+[SUM]   0.00-10.01  sec  1.33 GBytes  1.14 Gbits/sec                  receiver
+```
+
+Conclusion: raising UE AMBR from `1 Gbps` uplink to `20 Gbps` uplink did not increase the PacketRusher UE-plane iperf result. The observed limit is therefore likely elsewhere in the UE/PacketRusher/UPF path, not the provisioned UE AMBR.
+
 Result status: passed. PacketRusher successfully generated UE-plane TCP traffic from `10.63.0.1` through UPF to the persistent N6 iperf3 server at `10.200.6.10`.

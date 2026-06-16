@@ -191,3 +191,6 @@ subprov:
   fieldPath: status.hostIP
   token: admin
   configMapName: sub-data
+  subscribedUeAmbr:
+    downlink: "20 Gbps"
+    uplink: "20 Gbps"

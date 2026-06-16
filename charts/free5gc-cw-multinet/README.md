@@ -22,6 +22,19 @@ The server keeps running as a Deployment named `<release>-iperf3-server`. It add
 
 The chart defaults to `gtp5g.version=v0.9.14`. Keep this aligned with the deployed free5GC UPF image. If the UPF logs show `CreatePDR`, `CreateFAR`, or `CreateQER` errors, stop PacketRusher/UPF traffic, upgrade the module version, restart UPF/SMF/AMF, and then start PacketRusher again so stale PDU session state is cleared.
 
+## Subscriber AMBR
+
+The provisioned UE AMBR is configurable:
+
+```yaml
+subprov:
+  subscribedUeAmbr:
+    downlink: "20 Gbps"
+    uplink: "20 Gbps"
+```
+
+The subscriber provisioner creates new subscribers and updates existing subscribers on reruns. It uses `POST` first and falls back to `PUT` when the WebUI reports that the subscriber already exists.
+
 Run the PacketRusher client from the repository root:
 
 ```sh

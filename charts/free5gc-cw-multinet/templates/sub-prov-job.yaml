@@ -78,8 +78,8 @@ data:
               "singleNssais": []
             },
             "subscribedUeAmbr": {
-              "downlink": "2 Gbps",
-              "uplink": "1 Gbps"
+              "downlink": "{{ $.Values.subprov.subscribedUeAmbr.downlink }}",
+              "uplink": "{{ $.Values.subprov.subscribedUeAmbr.uplink }}"
             }
           },
           "SessionManagementSubscriptionData": [
@@ -348,18 +348,17 @@ spec:
               msisdn=$(echo "$subscriber" | jq -r '.AccessAndMobilitySubscriptionData.gpsis[0]')
               plmnID=$(echo "$subscriber" | jq -r '.plmnID')
 
-              # Try Token header (used by WebUI); include JSON content type
+              # Create new subscribers and update existing subscribers idempotently.
               code=$(curl -s -o /tmp/resp.txt -w '%{http_code}' \
                       -X POST "$BASE_URL/api/subscriber/$imsi/$plmnID" \
                       -H "Token: $TOKEN" \
                       -H 'Content-Type: application/json' \
                       -d "$subscriber")
 
-              # Fallback to Authorization: Bearer if first attempt fails
-              if [ "$code" -ge 400 ]; then
+              if [ "$code" = "409" ]; then
                 code=$(curl -s -o /tmp/resp.txt -w '%{http_code}' \
-                        -X POST "$BASE_URL/api/subscriber/$imsi/$plmnID" \
-                        -H "Authorization: Bearer $TOKEN" \
+                        -X PUT "$BASE_URL/api/subscriber/$imsi/$plmnID" \
+                        -H "Token: $TOKEN" \
                         -H 'Content-Type: application/json' \
                         -d "$subscriber")
               fi
